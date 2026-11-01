@@ -11,9 +11,14 @@ part of the game. Kotlin and Jetpack Compose; the font is Horizon's own Geist fr
 - **The list**: search by title, `#number`, `@user` or label; filter by status or label; sort by newest, recently
   updated, most discussed or oldest. Each row has a status pill (`Available`, `@login · 2d left`, `PR #123`,
   `Draft #123`), labels, assignees and comment count. Pull to refresh; the last list is kept for offline starts.
+- **Open / Fixed**: the toggle beside the title switches to the issues recently closed as fixed (the last 300
+  closed issues GitHub touched, keeping those closed as completed), most recently closed first, each with the merged
+  pull request that closed it, and how many were fixed in the last day, week and month.
 - **An issue**: its status card (who claimed it and when, and the 5-day release clock of a `/claim` made without a
   pull request), its linked pull requests (open, draft, merged, closed; whether they close or mention it), the
-  description and comments in Markdown, with `/claim` comments marked. With a token, *Claim this issue* posts
+  description and comments in Markdown. `/claim` comments (also `🤖 Agent: /claim`) are badged by what came of them:
+  *claim* for the one its author holds, *refused* when the workflow answered with a refusal, *claim · over* when it
+  was released or given back. With a token, *Claim this issue* posts
   `/claim` for you.
 
 The statuses follow `tools/ci/claim_command.py`:
@@ -23,6 +28,7 @@ The statuses follow `tools/ci/claim_command.py`:
 | Available | No assignee, no `in progress` label (Kira's Discord claim), no open pull request linking it |
 | Claimed | An assignee (a `/claim`, or by hand) or the `in progress` label. A `/claim` (assigned by the workflow) is released after 5 days without an open linked pull request; assignments by hand never are |
 | Has PR | An open or draft pull request links it: `Fixes #N`, the sidebar, a mention, or its number in the branch name |
+| Fixed | Closed as completed (GitHub's state reason; issues closed before it existed count too) |
 
 ## Data
 
