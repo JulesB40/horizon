@@ -3,6 +3,7 @@ package dev.horizonlab.issues.data
 import dev.horizonlab.issues.core.GitHubClient
 import dev.horizonlab.issues.core.Issue
 import dev.horizonlab.issues.core.Repo
+import dev.horizonlab.issues.core.Scope
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import java.io.File
@@ -12,17 +13,19 @@ data class CachedIssues(val fetchedAt: Long, val issues: List<Issue>)
 
 /** The last list per repository, so the app opens on it at once and works offline. */
 class IssueCache(private val dir: File) {
-    private fun file(repo: Repo) = File(dir, "issues-${repo.owner}-${repo.name}.json")
+    private fun file(repo: Repo, scope: Scope) =
+        File(dir, (if (scope == Scope.OPEN) "issues" else "fixed") + "-${repo.owner}-${repo.name}.json")
 
-    fun read(repo: Repo): CachedIssues? = runCatching {
-        GitHubClient.JSON.decodeFromString<CachedIssues>(file(repo).readText())
+    fun read(repo: Repo, scope: Scope): CachedIssues? = runCatching {
+        GitHubClient.JSON.decodeFromString<CachedIssues>(file(repo, scope).readText())
     }.getOrNull()
 
-    fun write(repo: Repo, cached: CachedIssues) {
+    fun write(repo: Repo, scope: Scope, cached: CachedIssues) {
         runCatching {
-            val tmp = File(dir, file(repo).name + ".tmp")
+            val target = file(repo, scope)
+            val tmp = File(dir, target.name + ".tmp")
             tmp.writeText(GitHubClient.JSON.encodeToString(cached))
-            tmp.renameTo(file(repo))
+            tmp.renameTo(target)
         }
     }
 }

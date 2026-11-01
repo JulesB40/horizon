@@ -57,6 +57,9 @@ data class LinkedPr(
     val updatedAt: Long = 0,
 )
 
+/** Which issues a list holds: the open ones, or the ones recently closed as fixed. */
+enum class Scope { OPEN, FIXED }
+
 /** The 3 states the list filters on, in the order an issue moves through them. */
 enum class IssueStatus {
     /** Nobody holds it and no open pull request links it: free to `/claim`. */
@@ -67,6 +70,9 @@ enum class IssueStatus {
 
     /** An open or draft pull request links it. */
     HAS_PR,
+
+    /** Closed as completed: fixed, usually by a merged pull request. */
+    FIXED,
 }
 
 /** One assignee's claim, from the issue's timeline. */
@@ -95,7 +101,15 @@ data class Issue(
     /** Known only when the list came from GraphQL (a token is set); the detail screen always fills it. */
     val claims: List<Claim> = emptyList(),
     val body: String? = null,
+    /** When it was closed; 0 while it is open. */
+    val closedAt: Long = 0,
+    /** GitHub's state reason of a closed issue: `completed`, `not_planned`, `duplicate`. */
+    val stateReason: String? = null,
+    /** The pull request whose merge closed it, when the timeline says. */
+    val closedByPr: Int? = null,
 ) {
+    val closed: Boolean get() = closedAt > 0
+
     /** Kira's Discord `/claim` adds this label instead of an assignee. */
     val claimedOnDiscord: Boolean get() = labels.any { it.name.equals(ClaimRules.KIRA_LABEL, ignoreCase = true) }
 
@@ -105,14 +119,20 @@ data class Issue(
 
     val status: IssueStatus
         get() = when {
+            closed -> IssueStatus.FIXED
             activePrs.isNotEmpty() -> IssueStatus.HAS_PR
             claimed -> IssueStatus.CLAIMED
             else -> IssueStatus.AVAILABLE
         }
 
-    /** The pull request to show on the row: an open closing one first, then any open one, then the newest. */
+    /** The merged pull request that fixed a closed issue: the one that closed it, else a merged closing one. */
+    val fixingPr: LinkedPr?
+        get() = linkedPrs.firstOrNull { it.number == closedByPr }
+            ?: linkedPrs.filter { it.state == PrState.MERGED }.minWithOrNull(compareBy<LinkedPr> { it.kind }.thenByDescending { it.updatedAt })
+
+    /** The pull request to show on the row: the fixing one of a closed issue, an open closing one, any open one. */
     val primaryPr: LinkedPr?
-        get() = linkedPrs.sortedWith(
+        get() = (if (closed) fixingPr else null) ?: linkedPrs.sortedWith(
             compareByDescending<LinkedPr> { it.state.active }
                 .thenBy { it.kind }
                 .thenByDescending { it.state == PrState.MERGED }

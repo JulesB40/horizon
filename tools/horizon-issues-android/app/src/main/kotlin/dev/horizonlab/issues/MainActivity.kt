@@ -84,6 +84,7 @@ private fun App(vm: IssuesViewModel) {
                 ui = list,
                 snackbar = snackbar,
                 onRefresh = { vm.refresh(fresh = true) },
+                onScope = vm::setScope,
                 onFilter = vm::setFilter,
                 onSort = vm::setSort,
                 onQuery = vm::setQuery,
@@ -98,7 +99,7 @@ private fun App(vm: IssuesViewModel) {
             IssueDetailScreen(
                 number = number,
                 repo = list.repo,
-                listCopy = list.all.firstOrNull { it.number == number },
+                listCopy = list.lists.values.asSequence().flatten().firstOrNull { it.number == number },
                 state = details[number] ?: DetailUi(loading = true),
                 canComment = settings.token.isNotBlank(),
                 snackbar = snackbar,

@@ -58,6 +58,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import dev.horizonlab.issues.core.ClaimRules
+import dev.horizonlab.issues.core.ClaimVerdict
 import dev.horizonlab.issues.core.Comment
 import dev.horizonlab.issues.core.Issue
 import dev.horizonlab.issues.core.IssueStatus
@@ -101,6 +102,13 @@ fun IssueDetailScreen(
     val issue = state.detail?.issue ?: listCopy
     val url = issue?.url ?: "${repo.url}/issues/$number"
     var confirmClaim by remember { mutableStateOf(false) }
+    val comments = state.detail?.comments.orEmpty()
+    val assignees = issue?.assignees.orEmpty()
+    // What came of each /claim in the thread: held, refused by the workflow, or over.
+    val verdicts = remember(comments, assignees) { ClaimRules.verdicts(comments, assignees) }
+    val heldSince = remember(comments, verdicts) {
+        comments.filter { verdicts[it.id] == ClaimVerdict.HOLDS }.associate { it.author!!.login.lowercase() to it.createdAt }
+    }
 
     Scaffold(
         containerColor = p.screen,
@@ -174,7 +182,7 @@ fun IssueDetailScreen(
                 }
 
                 item(key = "status") {
-                    StatusCard(issue, canComment, state.posting, detailLoaded = state.detail != null, onClaim = { confirmClaim = true }) {
+                    StatusCard(issue, heldSince, canComment, state.posting, detailLoaded = state.detail != null, onClaim = { confirmClaim = true }) {
                         openUrl(context, url, p)
                     }
                 }
@@ -211,10 +219,9 @@ fun IssueDetailScreen(
                     }
                 }
 
-                val comments = state.detail?.comments.orEmpty()
                 if (comments.isNotEmpty()) {
                     item(key = "comments-title") { SectionTitle("Comments", comments.size) }
-                    items(comments, key = { "c" + it.id }) { CommentItem(it, repo) { openUrl(context, it.url, p) } }
+                    items(comments, key = { "c" + it.id }) { CommentItem(it, verdicts[it.id], repo) { openUrl(context, it.url, p) } }
                 }
 
                 if (state.error != null) {
@@ -257,6 +264,7 @@ fun IssueDetailScreen(
 @Composable
 private fun StatusCard(
     issue: Issue,
+    heldSince: Map<String, Long>,
     canComment: Boolean,
     posting: Boolean,
     detailLoaded: Boolean,
@@ -289,15 +297,20 @@ private fun StatusCard(
                         IssueStatus.AVAILABLE -> "Available"
                         IssueStatus.CLAIMED -> "Claimed"
                         IssueStatus.HAS_PR -> if (pr?.state == PrState.DRAFT) "Draft in progress" else "In review"
+                        IssueStatus.FIXED -> "Fixed"
                     },
                     style = Type.base.copy(fontWeight = FontWeight.SemiBold), color = tone.content,
                 )
                 Text(
                     when (status) {
                         IssueStatus.AVAILABLE -> "Nobody holds it and no pull request links it."
-                        IssueStatus.CLAIMED -> claimLine(issue)
+                        IssueStatus.CLAIMED -> claimLine(issue, heldSince)
                         IssueStatus.HAS_PR -> "Pull request #${pr!!.number}" + (pr.author?.let { " by @${it.login}" } ?: "") +
                             if (pr.kind == LinkKind.CLOSES) " closes it" else " mentions it"
+                        IssueStatus.FIXED -> "Closed ${ago(issue.closedAt)}" + (
+                            issue.fixingPr?.let { fix -> " by pull request #${fix.number}" + (fix.author?.let { " from @${it.login}" } ?: "") }
+                                ?: ", no merged pull request found"
+                            ) + "."
                     },
                     style = Type.xs, color = tone.content.copy(alpha = 0.85f),
                 )
@@ -364,11 +377,13 @@ private fun StatusCard(
     }
 }
 
-private fun claimLine(issue: Issue): String {
+private fun claimLine(issue: Issue, heldSince: Map<String, Long>): String {
     if (issue.assignees.isEmpty()) return "Taken on Discord (Kira's “in progress” label)."
     val who = issue.assignees.joinToString(", ") { "@" + it.login }
     val claim = issue.claims.filter { it.claimedAt > 0 }.maxByOrNull { it.claimedAt }
+    val comment = issue.assignees.mapNotNull { heldSince[it.login.lowercase()] }.maxOrNull()
     return when {
+        claim == null && comment != null -> "$who claimed it ${ago(comment)}."
         claim == null -> "Assigned to $who."
         claim.viaCommand -> "$who claimed it with /claim ${ago(claim.claimedAt)}."
         else -> "Assigned to $who ${ago(claim.claimedAt)}, by hand: no expiry."
@@ -409,9 +424,15 @@ private fun PrRow(pr: LinkedPr, onClick: () -> Unit) {
 }
 
 @Composable
-private fun CommentItem(comment: Comment, repo: Repo, onOpen: () -> Unit) {
+private fun CommentItem(comment: Comment, verdict: ClaimVerdict?, repo: Repo, onOpen: () -> Unit) {
     val p = Theme.palette
-    val isClaim = ClaimRules.isClaimComment(comment.body)
+    val badge = when (verdict) {
+        ClaimVerdict.HOLDS -> "claim" to p.claimed
+        ClaimVerdict.REFUSED -> "refused" to p.danger
+        ClaimVerdict.ENDED -> "claim · over" to p.draft
+        ClaimVerdict.UNCLAIM -> "unclaim" to p.draft
+        null -> null
+    }
     Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp)) {
         Avatar(comment.author, 30.dp, Modifier.padding(top = 2.dp))
         Spacer(Modifier.width(10.dp))
@@ -420,7 +441,7 @@ private fun CommentItem(comment: Comment, repo: Repo, onOpen: () -> Unit) {
                 .weight(1f)
                 .clip(RoundedCornerShape(16.dp))
                 .background(p.card)
-                .border(1.dp, if (isClaim) p.claimed.border else p.border, RoundedCornerShape(16.dp))
+                .border(1.dp, if (verdict == ClaimVerdict.HOLDS) p.claimed.border else p.border, RoundedCornerShape(16.dp))
                 .padding(horizontal = 14.dp, vertical = 12.dp),
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -433,9 +454,9 @@ private fun CommentItem(comment: Comment, repo: Repo, onOpen: () -> Unit) {
                     Spacer(Modifier.width(6.dp))
                     Pill("bot", p.draft)
                 }
-                if (isClaim) {
+                if (badge != null) {
                     Spacer(Modifier.width(6.dp))
-                    Pill("claim", p.claimed)
+                    Pill(badge.first, badge.second)
                 }
                 Spacer(Modifier.weight(1f))
                 Text(

@@ -76,6 +76,27 @@ class LinkerTest {
     }
 
     @Test
+    fun claimVerdictsFollowTheThread() {
+        // Issue #6384: the agent's claim holds, a later /claim is refused by the workflow.
+        fun c(id: Long, who: String, body: String) = Comment(id, User(who), body, id * 1000)
+        val thread = listOf(
+            c(1, "HrafnaValkyrja", "🤖 Agent: /claim"),
+            c(2, "oxi-does-dev", "/claim"),
+            c(3, "github-actions[bot]", "🤖 Claims: refused, @HrafnaValkyrja already claimed this issue: pick another, " +
+                "or ask them here. (asked by @oxi-does-dev)"),
+            c(4, "someone", "I can /claim this later"),
+        )
+        val v = ClaimRules.verdicts(thread, listOf(User("HrafnaValkyrja")))
+        assertEquals(mapOf(1L to ClaimVerdict.HOLDS, 2L to ClaimVerdict.REFUSED), v)
+
+        // A claim that took and was then given back.
+        val released = listOf(c(1, "a", "/claim"), c(2, "a", "/unclaim"))
+        assertEquals(mapOf(1L to ClaimVerdict.ENDED, 2L to ClaimVerdict.UNCLAIM), ClaimRules.verdicts(released, emptyList()))
+        assertEquals("claim", ClaimRules.command("\n  /claim\n"))
+        assertNull(ClaimRules.command("/claimed it"))
+    }
+
+    @Test
     fun parsesRepos() {
         assertEquals(Repo.HORIZON, Repo.parse("horizon-rust/horizon"))
         assertEquals(Repo.HORIZON, Repo.parse("https://github.com/horizon-rust/horizon/issues/5835"))

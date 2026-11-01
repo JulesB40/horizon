@@ -40,6 +40,7 @@ data class Palette(
         IssueStatus.AVAILABLE -> available
         IssueStatus.CLAIMED -> claimed
         IssueStatus.HAS_PR -> review
+        IssueStatus.FIXED -> merged
     }
 
     fun tone(state: PrState): Tone = when (state) {

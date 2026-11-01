@@ -106,6 +106,7 @@ fun statusIcon(status: IssueStatus): ImageVector = when (status) {
     IssueStatus.AVAILABLE -> Icons.Rounded.RadioButtonUnchecked
     IssueStatus.CLAIMED -> Icons.Rounded.Schedule
     IssueStatus.HAS_PR -> Icons.Rounded.CallMerge
+    IssueStatus.FIXED -> Icons.Rounded.DoneAll
 }
 
 fun prIcon(state: PrState): ImageVector = when (state) {
@@ -136,6 +137,7 @@ fun statusText(issue: Issue, now: Long = System.currentTimeMillis()): String = w
         val pr = issue.primaryPr!!
         (if (pr.state == PrState.DRAFT) "Draft #" else "PR #") + pr.number
     }
+    IssueStatus.FIXED -> "Fixed" + (issue.fixingPr?.let { " · #${it.number}" } ?: "")
 }
 
 @Composable

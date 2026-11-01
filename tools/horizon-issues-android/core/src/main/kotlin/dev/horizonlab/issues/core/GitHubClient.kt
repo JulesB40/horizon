@@ -7,6 +7,8 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.add
+import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import okhttp3.Cache
@@ -43,8 +45,31 @@ class GitHubClient(
     // --- The list ---------------------------------------------------------------------------------------------
 
     /** Every open issue, newest first. `fresh` revalidates cached pages instead of trusting them for a minute. */
-    suspend fun openIssues(repo: Repo, fresh: Boolean = false): List<Issue> = withContext(Dispatchers.IO) {
-        if (authenticated) openIssuesGraphQl(repo) else openIssuesRest(repo, fresh)
+    suspend fun openIssues(repo: Repo, fresh: Boolean = false): List<Issue> = issues(repo, Scope.OPEN, fresh)
+
+    /**
+     * The open issues, newest first, or the recently closed ones that were fixed (closed as completed), most
+     * recently closed first: the last [MAX_FIXED_PAGES] hundred closed issues GitHub touched.
+     */
+    suspend fun issues(repo: Repo, scope: Scope, fresh: Boolean = false): List<Issue> = withContext(Dispatchers.IO) {
+        when (scope) {
+            Scope.OPEN -> if (authenticated) issuesGraphQl(repo, scope, MAX_ISSUE_PAGES) else openIssuesRest(repo, fresh)
+            Scope.FIXED -> (if (authenticated) issuesGraphQl(repo, scope, MAX_FIXED_PAGES) else fixedIssuesRest(repo, fresh))
+                .filter { it.closed && isFixed(it.stateReason) }
+                .sortedByDescending { it.closedAt }
+        }
+    }
+
+    /** Closed as completed; issues closed before GitHub kept a reason have none and count as fixed. */
+    private fun isFixed(reason: String?): Boolean = reason == null || reason.equals("completed", ignoreCase = true)
+
+    private fun fixedIssuesRest(repo: Repo, fresh: Boolean): List<Issue> {
+        val raw = pages<RestIssue>("/repos/${repo.slug}/issues?state=closed&sort=updated&direction=desc", MAX_FIXED_PAGES, fresh)
+            .filter { it.pullRequest == null }
+        val merged = pages<RestPull>("/repos/${repo.slug}/pulls?state=closed&sort=updated&direction=desc", MAX_FIXED_PAGES, fresh)
+            .filter { it.mergedAt != null }
+        val links = Linker.link(repo, merged.map { it.toLinkerPr() })
+        return raw.map { it.toIssue(links[it.number].orEmpty()) }
     }
 
     private fun openIssuesRest(repo: Repo, fresh: Boolean): List<Issue> {
@@ -57,13 +82,15 @@ class GitHubClient(
         return raw.map { it.toIssue(links[it.number].orEmpty()) }
     }
 
-    private fun openIssuesGraphQl(repo: Repo): List<Issue> {
+    private fun issuesGraphQl(repo: Repo, scope: Scope, maxPages: Int): List<Issue> {
         val out = ArrayList<Issue>()
         var cursor: String? = null
-        repeat(MAX_ISSUE_PAGES) {
+        repeat(maxPages) {
             val variables = buildJsonObject {
                 put("owner", repo.owner)
                 put("name", repo.name)
+                put("states", buildJsonArray { add(if (scope == Scope.OPEN) "OPEN" else "CLOSED") })
+                put("order", if (scope == Scope.OPEN) "CREATED_AT" else "UPDATED_AT")
                 if (cursor != null) put("cursor", cursor)
             }
             val data = graphQl<GqlData>(ISSUES_QUERY, variables)
@@ -91,7 +118,7 @@ class GitHubClient(
             .sortedWith(compareByDescending<LinkedPr> { it.state.active }.thenByDescending { it.updatedAt })
         val base = issue.toIssue(linked)
         IssueDetail(
-            issue = base.copy(claims = claimsFrom(base.assignees, timeline)),
+            issue = base.copy(claims = claimsFrom(base.assignees, timeline), closedByPr = known?.closedByPr),
             comments = comments.map { it.toComment() },
         )
     }
@@ -194,6 +221,7 @@ class GitHubClient(
         const val PAGE = 100
         const val MAX_ISSUE_PAGES = 10
         const val MAX_PR_PAGES = 5
+        const val MAX_FIXED_PAGES = 3
 
         val JSON = Json {
             ignoreUnknownKeys = true
@@ -219,22 +247,23 @@ class GitHubClient(
         }
 
         private val ISSUES_QUERY = """
-            query(${'$'}owner: String!, ${'$'}name: String!, ${'$'}cursor: String) {
+            query(${'$'}owner: String!, ${'$'}name: String!, ${'$'}cursor: String, ${'$'}states: [IssueState!], ${'$'}order: IssueOrderField!) {
               repository(owner: ${'$'}owner, name: ${'$'}name) {
-                issues(first: 100, states: OPEN, after: ${'$'}cursor, orderBy: {field: CREATED_AT, direction: DESC}) {
+                issues(first: 100, states: ${'$'}states, after: ${'$'}cursor, orderBy: {field: ${'$'}order, direction: DESC}) {
                   pageInfo { hasNextPage endCursor }
                   nodes {
-                    number title url createdAt updatedAt
+                    number title url createdAt updatedAt closedAt stateReason
                     author { login avatarUrl }
                     comments { totalCount }
                     labels(first: 20) { nodes { name color } }
                     assignees(first: 10) { nodes { login avatarUrl } }
                     closedByPullRequestsReferences(first: 10, includeClosedPrs: true) { nodes { ...pr } }
-                    timelineItems(last: 50, itemTypes: [ASSIGNED_EVENT, CROSS_REFERENCED_EVENT]) {
+                    timelineItems(last: 50, itemTypes: [ASSIGNED_EVENT, CROSS_REFERENCED_EVENT, CLOSED_EVENT]) {
                       nodes {
                         __typename
                         ... on AssignedEvent { createdAt actor { login } assignee { ... on User { login } } }
                         ... on CrossReferencedEvent { source { __typename ... on PullRequest { ...pr } } }
+                        ... on ClosedEvent { createdAt closer { __typename ... on PullRequest { ...pr } } }
                       }
                     }
                   }
@@ -279,6 +308,8 @@ internal data class RestIssue(
     val draft: Boolean = false,
     @SerialName("pull_request") val pullRequest: RestPrRef? = null,
     @SerialName("repository_url") val repositoryUrl: String = "",
+    @SerialName("closed_at") val closedAt: String? = null,
+    @SerialName("state_reason") val stateReason: String? = null,
 ) {
     fun toIssue(links: List<LinkedPr>) = Issue(
         number = number,
@@ -292,6 +323,8 @@ internal data class RestIssue(
         updatedAt = GitHubClient.millis(updatedAt),
         linkedPrs = links,
         body = body,
+        closedAt = if (state == "closed") closedAt?.let(GitHubClient::millis) ?: 0 else 0,
+        stateReason = stateReason.takeIf { state == "closed" },
     )
 
     /** The state of the pull request this issue object stands for. */
@@ -453,6 +486,7 @@ internal data class GqlEvent(
     val actor: GqlActor? = null,
     val assignee: GqlActor? = null,
     val source: GqlPr? = null,
+    val closer: GqlPr? = null,
 )
 
 @Serializable
@@ -462,6 +496,8 @@ internal data class GqlIssue(
     val url: String,
     val createdAt: String = "",
     val updatedAt: String = "",
+    val closedAt: String? = null,
+    val stateReason: String? = null,
     val author: GqlActor? = null,
     val comments: GqlCount = GqlCount(),
     val labels: GqlNodes<GqlLabel> = GqlNodes(),
@@ -478,6 +514,8 @@ internal data class GqlIssue(
             .mapNotNull { it.source }
             .filter { it.isPr && it.repository?.nameWithOwner.equals(repoName, ignoreCase = true) }
             .map { it.toLinked(LinkKind.MENTIONS) }
+        // The pull request whose merge closed it: the newest close, in case it was reopened and closed again.
+        val closer = if (closedAt == null) null else events.lastOrNull { it.typename == "ClosedEvent" }?.closer?.takeIf { it.isPr }
         val users = assignees.nodes.filterNotNull().mapNotNull { it.toUser() }
         val lastAssigned = HashMap<String, GqlEvent>()
         for (e in events) {
@@ -498,8 +536,11 @@ internal data class GqlIssue(
             comments = comments.totalCount,
             createdAt = GitHubClient.millis(createdAt),
             updatedAt = GitHubClient.millis(updatedAt),
-            linkedPrs = Linker.merge(closing, mentions),
+            linkedPrs = Linker.merge(listOfNotNull(closer?.toLinked(LinkKind.CLOSES)) + closing, mentions),
             claims = claims,
+            closedAt = closedAt?.let(GitHubClient::millis) ?: 0,
+            stateReason = stateReason?.lowercase(),
+            closedByPr = closer?.number,
         )
     }
 }

@@ -112,6 +112,45 @@ class GitHubClientTest {
     }
 
     @Test
+    fun restFixedListKeepsCompletedIssuesWithTheirMergedPr() = runTest {
+        routes["GET /repos/horizon-rust/horizon/issues"] = """[
+          {"number":10,"title":"Old fix","html_url":"u","state":"closed","state_reason":"completed",
+           "closed_at":"2026-10-01T00:00:00Z","updated_at":"2026-10-31T00:00:00Z"},
+          {"number":11,"title":"Won't do","html_url":"u","state":"closed","state_reason":"not_planned",
+           "closed_at":"2026-10-30T00:00:00Z"},
+          {"number":12,"title":"New fix","html_url":"u","state":"closed","state_reason":"completed",
+           "closed_at":"2026-10-30T00:00:00Z"}
+        ]"""
+        routes["GET /repos/horizon-rust/horizon/pulls"] = """[
+          {"number":20,"title":"Fix it","body":"Fixes #12","html_url":"p","state":"closed","merged_at":"2026-10-30T00:00:00Z"},
+          {"number":21,"title":"Abandoned","body":"Fixes #10","html_url":"p","state":"closed","merged_at":null}
+        ]"""
+        val fixed = client().issues(Repo.HORIZON, Scope.FIXED)
+        assertEquals(listOf(12, 10), fixed.map { it.number })
+        assertTrue(fixed.all { it.status == IssueStatus.FIXED })
+        assertEquals(20, fixed[0].primaryPr!!.number)
+        assertEquals(null, fixed[1].primaryPr)
+    }
+
+    @Test
+    fun graphQlFixedListReadsTheCloser() = runTest {
+        routes["POST /graphql"] = """{"data":{"repository":{"issues":{
+          "pageInfo":{"hasNextPage":false,"endCursor":null},
+          "nodes":[{"number":7,"title":"T","url":"https://github.com/horizon-rust/horizon/issues/7",
+            "closedAt":"2026-10-23T00:00:00Z","stateReason":"COMPLETED",
+            "closedByPullRequestsReferences":{"nodes":[]},
+            "timelineItems":{"nodes":[
+              {"__typename":"ClosedEvent","createdAt":"2026-10-23T00:00:00Z","closer":{"__typename":"PullRequest",
+                "number":9,"title":"P","url":"p","state":"MERGED","isDraft":false,"updatedAt":"2026-10-23T00:00:00Z",
+                "repository":{"nameWithOwner":"horizon-rust/horizon"}}}
+            ]}}]}}}}"""
+        val issue = client("tok").issues(Repo.HORIZON, Scope.FIXED).single()
+        assertEquals(9, issue.closedByPr)
+        assertEquals(PrState.MERGED, issue.primaryPr!!.state)
+        assertTrue(server.takeRequest().body.readUtf8().contains("\"states\":[\"CLOSED\"]"))
+    }
+
+    @Test
     fun rateLimitIsExplained() = runTest {
         server.dispatcher = object : Dispatcher() {
             override fun dispatch(request: RecordedRequest) = MockResponse().setResponseCode(403)

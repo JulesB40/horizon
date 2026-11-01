@@ -10,6 +10,7 @@ import dev.horizonlab.issues.core.IssueStatus
 import dev.horizonlab.issues.core.Label
 import dev.horizonlab.issues.core.RateLimit
 import dev.horizonlab.issues.core.Repo
+import dev.horizonlab.issues.core.Scope
 import dev.horizonlab.issues.data.CachedIssues
 import dev.horizonlab.issues.data.IssueCache
 import dev.horizonlab.issues.data.Settings
@@ -48,7 +49,10 @@ enum class Sort(val label: String) {
 
 data class ListUi(
     val repo: Repo = Repo.HORIZON,
-    val all: List<Issue> = emptyList(),
+    /** Open issues, or the ones recently fixed. */
+    val scope: Scope = Scope.OPEN,
+    val lists: Map<Scope, List<Issue>> = emptyMap(),
+    val fetched: Map<Scope, Long> = emptyMap(),
     val visible: List<Issue> = emptyList(),
     val counts: Map<Filter, Int> = emptyMap(),
     val labels: List<Pair<Label, Int>> = emptyList(),
@@ -59,23 +63,39 @@ data class ListUi(
     val loading: Boolean = false,
     val refreshing: Boolean = false,
     val error: String? = null,
-    val fetchedAt: Long = 0,
+    /** Fixed issues closed in the last day, week and month. */
+    val recent: List<Int> = listOf(0, 0, 0),
 ) {
-    fun recompute(): ListUi {
+    /** The issues of the current scope. */
+    val all: List<Issue> get() = lists[scope].orEmpty()
+    val fetchedAt: Long get() = fetched[scope] ?: 0
+
+    fun withList(scope: Scope, issues: List<Issue>, at: Long? = null) = copy(
+        lists = lists + (scope to issues),
+        fetched = if (at != null) fetched + (scope to at) else fetched,
+    )
+
+    fun recompute(now: Long = System.currentTimeMillis()): ListUi {
         val q = query.trim().removePrefix("#").lowercase()
+        // Every fixed issue has the same status: the status filters apply to open issues only.
+        val statusFilter = if (scope == Scope.FIXED) Filter.ALL else filter
         val filtered = all.filter { issue ->
-            filter.matches(issue) &&
+            statusFilter.matches(issue) &&
                 (label == null || issue.labels.any { it.name == label }) &&
                 (q.isEmpty() || issue.number.toString().startsWith(q) || issue.title.lowercase().contains(q) ||
                     issue.assignees.any { it.login.lowercase().contains(q) } ||
                     issue.labels.any { it.name.lowercase().contains(q) })
         }
+        // Fixed issues order by when they were closed.
+        val time: (Issue) -> Long = if (scope == Scope.FIXED) Issue::closedAt else Issue::createdAt
         val sorted = when (sort) {
-            Sort.NEWEST -> filtered.sortedByDescending { it.createdAt }
+            Sort.NEWEST -> filtered.sortedByDescending(time)
             Sort.UPDATED -> filtered.sortedByDescending { it.updatedAt }
             Sort.DISCUSSED -> filtered.sortedByDescending { it.comments }
-            Sort.OLDEST -> filtered.sortedBy { it.createdAt }
+            Sort.OLDEST -> filtered.sortedBy(time)
         }
+        val day = 86_400_000L
+        val recent = listOf(1L, 7L, 30L).map { days -> lists[Scope.FIXED].orEmpty().count { now - it.closedAt <= days * day } }
         val labelCounts = all.flatMap { it.labels }.groupBy { it.name }
             .map { (_, same) -> same.first() to same.size }
             .sortedByDescending { it.second }
@@ -83,6 +103,7 @@ data class ListUi(
             visible = sorted,
             counts = Filter.entries.associateWith { f -> all.count(f::matches) },
             labels = labelCounts,
+            recent = recent,
         )
     }
 }
@@ -123,24 +144,27 @@ class IssuesViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun loadCached() {
         val repo = store.settings.value.repo
-        val cached = cache.read(repo)
-        _list.update {
-            ListUi(repo = repo, filter = it.filter, sort = it.sort, all = cached?.issues.orEmpty(), fetchedAt = cached?.fetchedAt ?: 0)
-                .recompute()
+        _list.update { old ->
+            var ui = ListUi(repo = repo, scope = old.scope, filter = old.filter, sort = old.sort)
+            for (scope in Scope.entries) {
+                cache.read(repo, scope)?.let { ui = ui.withList(scope, it.issues, it.fetchedAt) }
+            }
+            ui.recompute()
         }
     }
 
-    /** Reloads the list; `fresh` revalidates every page (pull to refresh) instead of trusting a minute-old copy. */
+    /** Reloads the current list; `fresh` revalidates every page (pull to refresh) instead of trusting a minute-old copy. */
     fun refresh(fresh: Boolean = true) {
         refreshJob?.cancel()
         val repo = store.settings.value.repo
+        val scope = _list.value.scope
         _list.update { it.copy(loading = it.all.isEmpty(), refreshing = it.all.isNotEmpty() && fresh, error = null) }
         refreshJob = viewModelScope.launch {
             try {
-                val issues = client.openIssues(repo, fresh)
+                val issues = client.issues(repo, scope, fresh)
                 val now = System.currentTimeMillis()
-                cache.write(repo, CachedIssues(now, issues))
-                _list.update { it.copy(all = issues, fetchedAt = now, loading = false, refreshing = false).recompute() }
+                cache.write(repo, scope, CachedIssues(now, issues))
+                _list.update { it.withList(scope, issues, now).copy(loading = false, refreshing = false).recompute() }
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -151,12 +175,21 @@ class IssuesViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /** Switches between open and fixed issues; a list never loaded, or older than a minute, reloads. */
+    fun setScope(scope: Scope) {
+        if (scope == _list.value.scope) return
+        _list.update { it.copy(scope = scope, error = null, loading = false, refreshing = false).recompute() }
+        val age = System.currentTimeMillis() - _list.value.fetchedAt
+        if (_list.value.all.isEmpty() || age > 60_000) refresh(fresh = false) else refreshJob?.cancel()
+    }
+
     fun setFilter(filter: Filter) = _list.update { it.copy(filter = filter).recompute() }
     fun setSort(sort: Sort) = _list.update { it.copy(sort = sort).recompute() }
     fun setQuery(query: String) = _list.update { it.copy(query = query).recompute() }
     fun setLabel(label: String?) = _list.update { it.copy(label = label).recompute() }
 
-    fun issue(number: Int): Issue? = _list.value.all.firstOrNull { it.number == number }
+    /** The list's copy of an issue, open or fixed. */
+    fun issue(number: Int): Issue? = _list.value.lists.values.asSequence().flatten().firstOrNull { it.number == number }
 
     fun loadDetail(number: Int) {
         val repo = store.settings.value.repo
@@ -167,7 +200,11 @@ class IssuesViewModel(app: Application) : AndroidViewModel(app) {
                 _details.update { it + (number to (it[number] ?: DetailUi()).copy(loading = false, detail = detail)) }
                 // Keep the row in step with what the detail learnt (fresh assignees, timeline links).
                 _list.update { ui ->
-                    ui.copy(all = ui.all.map { if (it.number == number) detail.issue.copy(body = null) else it }).recompute()
+                    ui.copy(
+                        lists = ui.lists.mapValues { (_, issues) ->
+                            issues.map { if (it.number == number) detail.issue.copy(body = null) else it }
+                        },
+                    ).recompute()
                 }
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e

@@ -78,6 +78,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.horizonlab.issues.core.Issue
 import dev.horizonlab.issues.core.IssueStatus
+import dev.horizonlab.issues.core.Scope
 import dev.horizonlab.issues.ui.components.AvatarStack
 import dev.horizonlab.issues.ui.components.LabelChip
 import dev.horizonlab.issues.ui.components.SkeletonBox
@@ -96,6 +97,7 @@ fun IssueListScreen(
     ui: ListUi,
     snackbar: SnackbarHostState,
     onRefresh: () -> Unit,
+    onScope: (Scope) -> Unit,
     onFilter: (Filter) -> Unit,
     onSort: (Sort) -> Unit,
     onQuery: (String) -> Unit,
@@ -123,8 +125,8 @@ fun IssueListScreen(
                 modifier = Modifier.fillMaxSize(),
                 contentPadding = WindowInsets.navigationBars.asPaddingValues(),
             ) {
-                item(key = "header") { Header(ui, onSettings) }
-                item(key = "overview") { Overview(ui, onFilter) }
+                item(key = "header") { Header(ui, onScope, onSettings) }
+                item(key = "overview") { if (ui.scope == Scope.OPEN) Overview(ui, onFilter) else FixedOverview(ui) }
                 stickyHeader(key = "controls") { Controls(ui, onFilter, onSort, onQuery, onLabel) }
 
                 if (ui.error != null && ui.all.isNotEmpty()) {
@@ -139,7 +141,11 @@ fun IssueListScreen(
                     ui.visible.isEmpty() -> item(key = "empty") {
                         EmptyState(
                             Icons.Rounded.Inbox, p.draft, "Nothing here",
-                            if (ui.query.isNotBlank()) "No issue matches “${ui.query}”." else "No open issue in this view.",
+                            when {
+                                ui.query.isNotBlank() -> "No issue matches “${ui.query}”."
+                                ui.scope == Scope.FIXED -> "No issue was closed as fixed lately."
+                                else -> "No open issue in this view."
+                            },
                             if (ui.filter != Filter.ALL || ui.label != null || ui.query.isNotBlank()) "Clear filters" else null,
                         ) {
                             onFilter(Filter.ALL)
@@ -159,7 +165,7 @@ fun IssueListScreen(
 // --- Header and overview --------------------------------------------------------------------------------------
 
 @Composable
-private fun Header(ui: ListUi, onSettings: () -> Unit) {
+private fun Header(ui: ListUi, onScope: (Scope) -> Unit, onSettings: () -> Unit) {
     val p = Theme.palette
     Column(Modifier.padding(start = 20.dp, end = 12.dp, top = 8.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -170,12 +176,100 @@ private fun Header(ui: ListUi, onSettings: () -> Unit) {
             RoundIcon(Icons.Rounded.Settings, "Settings", onSettings)
         }
         Spacer(Modifier.height(10.dp))
-        Text("Issues", style = Type.xl3, color = p.foreground)
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("Issues", style = Type.xl3, color = p.foreground, modifier = Modifier.weight(1f))
+            ScopeToggle(ui.scope, onScope, Modifier.padding(end = 4.dp))
+        }
         Spacer(Modifier.height(2.dp))
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(ui.repo.slug, style = Type.mono, color = p.tertiary)
             if (ui.fetchedAt > 0) {
                 Text("  ·  updated ${ago(ui.fetchedAt)}", style = Type.xs2, color = p.tertiary)
+            }
+        }
+    }
+}
+
+/** Open | Fixed: the open issues, or the ones recently closed as fixed. */
+@Composable
+private fun ScopeToggle(scope: Scope, onScope: (Scope) -> Unit, modifier: Modifier = Modifier) {
+    val p = Theme.palette
+    Row(
+        modifier
+            .clip(RoundedCornerShape(12.dp))
+            .background(p.grouped)
+            .border(1.dp, p.border, RoundedCornerShape(12.dp))
+            .padding(3.dp),
+    ) {
+        listOf(Scope.OPEN to "Open", Scope.FIXED to "Fixed").forEach { (s, label) ->
+            val selected = s == scope
+            val tone = if (s == Scope.OPEN) p.available else p.merged
+            Row(
+                Modifier
+                    .clip(RoundedCornerShape(9.dp))
+                    .background(if (selected) p.card else Color.Transparent)
+                    .border(1.dp, if (selected) p.border else Color.Transparent, RoundedCornerShape(9.dp))
+                    .clickable { onScope(s) }
+                    .padding(horizontal = 12.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Box(Modifier.size(6.dp).clip(CircleShape).background(if (selected) tone.content else p.tertiary))
+                Spacer(Modifier.width(6.dp))
+                Text(
+                    label,
+                    style = Type.xs.copy(fontWeight = FontWeight.Medium),
+                    color = if (selected) p.foreground else p.secondary,
+                )
+            }
+        }
+    }
+}
+
+/** The fixed scope's summary: how many were closed as fixed lately, and how many of them by a merged pull request. */
+@Composable
+private fun FixedOverview(ui: ListUi) {
+    val p = Theme.palette
+    val total = ui.all.size
+    val withPr = ui.all.count { it.fixingPr != null }
+    Column(
+        Modifier
+            .padding(horizontal = 16.dp, vertical = 16.dp)
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(20.dp))
+            .background(p.card)
+            .border(1.dp, p.border, RoundedCornerShape(20.dp))
+            .padding(16.dp),
+    ) {
+        Row(verticalAlignment = Alignment.Bottom) {
+            Text(if (ui.loading && total == 0) "—" else total.toString(), style = Type.xl2, color = p.foreground)
+            Spacer(Modifier.width(6.dp))
+            Text("fixed lately", style = Type.sm, color = p.secondary, modifier = Modifier.padding(bottom = 4.dp))
+            Spacer(Modifier.weight(1f))
+            AnimatedVisibility(ui.loading || ui.refreshing, enter = fadeIn(), exit = fadeOut()) {
+                CircularProgressIndicator(Modifier.size(14.dp).padding(bottom = 2.dp), color = p.tertiary, strokeWidth = 1.5.dp)
+            }
+        }
+        Spacer(Modifier.height(12.dp))
+        // How many of them a merged pull request closed.
+        Row(Modifier.fillMaxWidth().height(8.dp), horizontalArrangement = Arrangement.spacedBy(3.dp)) {
+            if (total == 0) {
+                Box(Modifier.fillMaxSize().clip(CircleShape).background(p.grouped))
+            } else {
+                if (withPr > 0) Box(Modifier.weight(withPr.toFloat()).fillMaxHeight().clip(CircleShape).background(p.merged.content))
+                if (total - withPr > 0) {
+                    Box(Modifier.weight((total - withPr).toFloat()).fillMaxHeight().clip(CircleShape).background(p.draft.content.copy(alpha = 0.4f)))
+                }
+            }
+        }
+        Spacer(Modifier.height(6.dp))
+        Text(
+            "$withPr closed by a merged pull request",
+            style = Type.xs2, color = p.tertiary,
+        )
+        Spacer(Modifier.height(12.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            listOf("Last 24h", "Last 7 days", "Last 30 days").zip(ui.recent).forEach { (label, count) ->
+                StatTile(label, count, p.merged, selected = false, onClick = null)
             }
         }
     }
@@ -276,7 +370,7 @@ private fun Overview(ui: ListUi, onFilter: (Filter) -> Unit) {
 }
 
 @Composable
-private fun RowScope.StatTile(label: String, count: Int, tone: Tone, selected: Boolean, onClick: () -> Unit) {
+private fun RowScope.StatTile(label: String, count: Int, tone: Tone, selected: Boolean, onClick: (() -> Unit)?) {
     val p = Theme.palette
     val shape = RoundedCornerShape(14.dp)
     Column(
@@ -285,7 +379,7 @@ private fun RowScope.StatTile(label: String, count: Int, tone: Tone, selected: B
             .clip(shape)
             .background(if (selected) tone.background else p.grouped)
             .border(1.dp, if (selected) tone.border else Color.Transparent, shape)
-            .clickable(onClick = onClick)
+            .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
             .padding(horizontal = 12.dp, vertical = 10.dp),
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -323,8 +417,10 @@ private fun Controls(
             horizontalArrangement = Arrangement.spacedBy(6.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Filter.entries.forEach { f ->
-                FilterPill(f.label, ui.counts[f] ?: 0, ui.filter == f) { onFilter(f) }
+            if (ui.scope == Scope.OPEN) {
+                Filter.entries.forEach { f ->
+                    FilterPill(f.label, ui.counts[f] ?: 0, ui.filter == f) { onFilter(f) }
+                }
             }
             LabelMenu(ui, onLabel)
         }
@@ -496,7 +592,11 @@ fun IssueRow(issue: Issue, modifier: Modifier = Modifier, onClick: () -> Unit) {
                 Spacer(Modifier.height(3.dp))
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text("#${issue.number}", style = Type.xs2.copy(fontFamily = GeistMono), color = p.secondary)
-                    val meta = listOfNotNull(issue.author?.login, shortAgo(issue.createdAt).ifEmpty { null })
+                    val meta = if (issue.closed) {
+                        listOfNotNull("closed " + shortAgo(issue.closedAt), issue.fixingPr?.author?.login?.let { "by $it" })
+                    } else {
+                        listOfNotNull(issue.author?.login, shortAgo(issue.createdAt).ifEmpty { null })
+                    }
                     if (meta.isNotEmpty()) {
                         Text(" · " + meta.joinToString(" · "), style = Type.xs2, color = p.tertiary, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }

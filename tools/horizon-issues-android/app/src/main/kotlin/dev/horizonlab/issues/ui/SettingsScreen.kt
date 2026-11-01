@@ -203,6 +203,8 @@ fun SettingsScreen(
                 Legend("Available", p.available.content, "Nobody is assigned, no “${ClaimRules.KIRA_LABEL}” label, no open pull request links it.")
                 Legend("Claimed", p.claimed.content, "Someone is assigned (a /claim comment, or by hand), or Kira's Discord claim added “${ClaimRules.KIRA_LABEL}”. A /claim is released after ${ClaimRules.STALE_DAYS} days without an open pull request.")
                 Legend("Has PR", p.review.content, "An open or draft pull request links it: Fixes #N, the sidebar, a mention, or its number in the branch name.")
+                Legend("Fixed", p.merged.content, "Closed as completed (the Fixed side of the toggle), with the merged pull request that closed it when there is one.")
+                Legend("Claim badges", p.claimed.content, "On comments: “claim” is the claim its author holds, “refused” one the workflow turned down, “claim · over” one released or given back.")
             }
             Spacer(Modifier.height(24.dp))
         }
