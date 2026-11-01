@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- A sun on the horizon with three issue dots: open, claimed, in review. 108dp canvas, 66dp safe zone. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:fillColor="#346BF1"
+        android:pathData="M34,58 A20,20 0 0,1 74,58 Z" />
+    <path
+        android:fillColor="#F5F5F5"
+        android:pathData="M30,61h48a2,2 0 0,1 0,4h-48a2,2 0 0,1 0,-4z" />
+    <path
+        android:fillColor="#4ADE80"
+        android:pathData="M40,73m-3,0a3,3 0 1,0 6,0a3,3 0 1,0 -6,0" />
+    <path
+        android:fillColor="#FFB900"
+        android:pathData="M54,73m-3,0a3,3 0 1,0 6,0a3,3 0 1,0 -6,0" />
+    <path
+        android:fillColor="#51A2FF"
+        android:pathData="M68,73m-3,0a3,3 0 1,0 6,0a3,3 0 1,0 -6,0" />
+</vector>
