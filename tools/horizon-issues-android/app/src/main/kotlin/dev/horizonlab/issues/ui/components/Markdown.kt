@@ -12,7 +12,6 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
@@ -22,8 +21,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.LinkAnnotation
 import androidx.compose.ui.text.SpanStyle
@@ -36,8 +33,6 @@ import androidx.compose.ui.text.withLink
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import coil.compose.AsyncImage
-import coil.request.ImageRequest
 import dev.horizonlab.issues.ui.theme.GeistMono
 import dev.horizonlab.issues.ui.theme.Palette
 import dev.horizonlab.issues.ui.theme.Theme
@@ -51,12 +46,30 @@ private sealed interface Block {
     data class Quote(val text: String) : Block
     data class Code(val text: String) : Block
     data class Image(val url: String, val alt: String) : Block
+    data class Video(val url: String, val name: String) : Block
     data object Rule : Block
 }
 
 private val IMAGE_LINE = Regex("""^!\[([^\]]*)]\(([^)\s]+)[^)]*\)$""")
 private val IMG_TAG = Regex("""<img\b[^>]*\bsrc=["']([^"']+)["'][^>]*>""", RegexOption.IGNORE_CASE)
 private val LIST_ITEM = Regex("""^(\s*)([-*+]|\d+[.)])\s+(\[[ xX]]\s+)?(.*)$""")
+/** A line that is only a link, `[name](url)` or a bare URL: an attachment when the URL names a media file. */
+private val LINK_ONLY = Regex("""^\[([^\]]+)]\((\S+?)(?:\s+"[^"]*")?\)$""")
+private val URL_ONLY = Regex("""^<?(https?://\S+?)>?$""")
+
+/** The media block for a line that is only a link to an image or a video, else null. */
+private fun mediaBlock(text: String): Block? {
+    val t = text.trim()
+    val (name, url) = LINK_ONLY.find(t)?.let { it.groupValues[1] to it.groupValues[2] }
+        ?: URL_ONLY.find(t)?.let { m -> m.groupValues[1].let { it.substringBefore('?').substringAfterLast('/') to it } }
+        ?: return null
+    return when (mediaKind(url)) {
+        MediaKind.IMAGE -> Block.Image(url, name)
+        MediaKind.VIDEO -> Block.Video(url, name)
+        null -> null
+    }
+}
+
 private val HEADING = Regex("""^(#{1,6})\s+(.*?)\s*#*$""")
 
 private fun parse(markdown: String): List<Block> {
@@ -103,7 +116,8 @@ private fun parse(markdown: String): List<Block> {
             IMAGE_LINE.matches(trimmed) -> {
                 flush()
                 val m = IMAGE_LINE.find(trimmed)!!
-                out += Block.Image(m.groupValues[2], m.groupValues[1])
+                val url = m.groupValues[2]
+                out += if (mediaKind(url) == MediaKind.VIDEO) Block.Video(url, m.groupValues[1]) else Block.Image(url, m.groupValues[1])
             }
             trimmed.startsWith(">") -> {
                 flush()
@@ -114,6 +128,15 @@ private fun parse(markdown: String): List<Block> {
                 }
                 out += Block.Quote(quote.toString().trim())
                 continue
+            }
+            // Attachments Kira copies from Discord: `- [clip.mp4](https://cdn.discordapp.com/...)`, one per line.
+            LIST_ITEM.matches(line) && mediaBlock(LIST_ITEM.find(line)!!.groupValues[4]) != null -> {
+                flush()
+                out += mediaBlock(LIST_ITEM.find(line)!!.groupValues[4])!!
+            }
+            mediaBlock(trimmed) != null -> {
+                flush()
+                out += mediaBlock(trimmed)!!
             }
             LIST_ITEM.matches(line) -> {
                 flush()
@@ -231,16 +254,8 @@ fun Markdown(text: String, repoUrl: String, modifier: Modifier = Modifier) {
                 ) {
                     Text(block.text, style = Type.mono, color = p.foreground, softWrap = false)
                 }
-                is Block.Image -> AsyncImage(
-                    model = ImageRequest.Builder(LocalContext.current).data(block.url).crossfade(true).build(),
-                    contentDescription = block.alt,
-                    contentScale = ContentScale.FillWidth,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .heightIn(max = 360.dp)
-                        .clip(RoundedCornerShape(10.dp))
-                        .background(p.grouped),
-                )
+                is Block.Image -> MediaImage(block.url, block.alt.ifBlank { "image" })
+                is Block.Video -> MediaVideo(block.url, block.name.ifBlank { "video" })
                 Block.Rule -> Box(Modifier.fillMaxWidth().height(1.dp).background(p.separator))
             }
         }

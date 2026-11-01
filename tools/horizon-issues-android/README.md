@@ -19,7 +19,8 @@ part of the game. Kotlin and Jetpack Compose; the font is Horizon's own Geist fr
   opening its issues from both the open and fixed lists. They live on the phone, per repository.
 - **An issue**: its status card (who claimed it and when, and the 5-day release clock of a `/claim` made without a
   pull request), its linked pull requests (open, draft, merged, closed; whether they close or mention it), the
-  description and comments in Markdown. `/claim` comments (also `🤖 Agent: /claim`) are badged by what came of them:
+  description and comments in Markdown, with images and videos shown in place, also the Discord attachments
+  Kira copies in as links (an expired Discord link turns into a row pointing at the thread). `/claim` comments (also `🤖 Agent: /claim`) are badged by what came of them:
   *claim* for the one its author holds, *refused* when the workflow answered with a refusal, *claim · over* when it
   was released or given back. With a token, *Claim this issue* posts
   `/claim` for you.
