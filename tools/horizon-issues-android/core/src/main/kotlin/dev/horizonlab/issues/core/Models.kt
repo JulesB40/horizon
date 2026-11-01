@@ -60,6 +60,22 @@ data class LinkedPr(
 /** Which issues a list holds: the open ones, or the ones recently closed as fixed. */
 enum class Scope { OPEN, FIXED }
 
+/** How far back the fixed list reaches. */
+enum class FixedWindow(val days: Int, val label: String) {
+    DAY(1, "24 hours"),
+    WEEK(7, "7 days"),
+    MONTH(30, "30 days"),
+}
+
+/**
+ * The issues closed as completed in a window, most recently closed first, with how many were closed in each
+ * window (GitHub search's exact counts). The list stops at [GitHubClient.MAX_FIXED_PAGES] hundred issues.
+ */
+data class FixedIssues(val window: FixedWindow, val issues: List<Issue>, val counts: Map<FixedWindow, Int>) {
+    val total: Int get() = counts[window] ?: issues.size
+    val capped: Boolean get() = issues.size < total
+}
+
 /** The 3 states the list filters on, in the order an issue moves through them. */
 enum class IssueStatus {
     /** Nobody holds it and no open pull request links it: free to `/claim`. */

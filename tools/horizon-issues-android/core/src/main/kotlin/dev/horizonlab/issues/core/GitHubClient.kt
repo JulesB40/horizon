@@ -47,29 +47,94 @@ class GitHubClient(
     /** Every open issue, newest first. `fresh` revalidates cached pages instead of trusting them for a minute. */
     suspend fun openIssues(repo: Repo, fresh: Boolean = false): List<Issue> = issues(repo, Scope.OPEN, fresh)
 
-    /**
-     * The open issues, newest first, or the recently closed ones that were fixed (closed as completed), most
-     * recently closed first: the last [MAX_FIXED_PAGES] hundred closed issues GitHub touched.
-     */
-    suspend fun issues(repo: Repo, scope: Scope, fresh: Boolean = false): List<Issue> = withContext(Dispatchers.IO) {
-        when (scope) {
-            Scope.OPEN -> if (authenticated) issuesGraphQl(repo, scope, MAX_ISSUE_PAGES) else openIssuesRest(repo, fresh)
-            Scope.FIXED -> (if (authenticated) issuesGraphQl(repo, scope, MAX_FIXED_PAGES) else fixedIssuesRest(repo, fresh))
-                .filter { it.closed && isFixed(it.stateReason) }
-                .sortedByDescending { it.closedAt }
+    /** The open issues, newest first, or the fixed ones of the last week (see [fixedIssues]). */
+    suspend fun issues(repo: Repo, scope: Scope, fresh: Boolean = false): List<Issue> = when (scope) {
+        Scope.OPEN -> withContext(Dispatchers.IO) {
+            if (authenticated) issuesGraphQl(repo, MAX_ISSUE_PAGES) else openIssuesRest(repo, fresh)
         }
+        Scope.FIXED -> fixedIssues(repo, FixedWindow.WEEK, fresh).issues
     }
 
-    /** Closed as completed; issues closed before GitHub kept a reason have none and count as fixed. */
-    private fun isFixed(reason: String?): Boolean = reason == null || reason.equals("completed", ignoreCase = true)
+    /**
+     * The issues closed as completed in `window`, most recently closed first, through GitHub's search (it alone
+     * filters by close reason and date, and leaves pull requests out), with each window's exact count.
+     */
+    suspend fun fixedIssues(
+        repo: Repo,
+        window: FixedWindow,
+        fresh: Boolean = false,
+        now: Long = System.currentTimeMillis(),
+    ): FixedIssues = withContext(Dispatchers.IO) {
+        val query = { w: FixedWindow -> fixedQuery(repo, w, now) }
+        val (issues, total) = if (authenticated) fixedGraphQl(query(window)) else fixedRest(repo, query(window), fresh)
+        val sorted = issues.filter { it.closed }.distinctBy { it.number }.sortedByDescending { it.closedAt }
+        val capped = sorted.size < total
+        val counts = HashMap<FixedWindow, Int>()
+        counts[window] = total
+        val others = FixedWindow.entries.filter { it != window }
+        // A shorter window's count comes from the list itself when it is complete; the rest ask GitHub.
+        val asked = others.filter { capped || it.days > window.days }
+        for (w in others - asked.toSet()) counts[w] = sorted.count { now - it.closedAt <= w.days * DAY_MILLIS }
+        if (asked.isNotEmpty()) {
+            val found = if (authenticated) countGraphQl(asked.associateWith(query)) else asked.associateWith { searchCount(query(it), fresh) }
+            counts.putAll(found)
+        }
+        FixedIssues(window, sorted, counts)
+    }
 
-    private fun fixedIssuesRest(repo: Repo, fresh: Boolean): List<Issue> {
-        val raw = pages<RestIssue>("/repos/${repo.slug}/issues?state=closed&sort=updated&direction=desc", MAX_FIXED_PAGES, fresh)
-            .filter { it.pullRequest == null }
-        val merged = pages<RestPull>("/repos/${repo.slug}/pulls?state=closed&sort=updated&direction=desc", MAX_FIXED_PAGES, fresh)
+    private fun fixedQuery(repo: Repo, window: FixedWindow, now: Long): String {
+        val since = Instant.ofEpochSecond((now - window.days * DAY_MILLIS) / 1000).toString()
+        return "repo:${repo.slug} is:issue is:closed reason:completed closed:>=$since"
+    }
+
+    private fun searchPath(query: String, perPage: Int, page: Int) =
+        "/search/issues?q=" + java.net.URLEncoder.encode(query, "UTF-8") + "&sort=updated&order=desc&per_page=$perPage&page=$page"
+
+    private fun searchCount(query: String, fresh: Boolean): Int = getJson<RestSearch>(searchPath(query, 1, 1), fresh).totalCount
+
+    private fun fixedRest(repo: Repo, query: String, fresh: Boolean): Pair<List<Issue>, Int> {
+        val raw = ArrayList<RestIssue>()
+        var total = 0
+        for (page in 1..MAX_FIXED_PAGES) {
+            val result = getJson<RestSearch>(searchPath(query, PAGE, page), fresh)
+            total = result.totalCount
+            raw += result.items.filter { it.pullRequest == null }
+            if (result.items.size < PAGE) break
+        }
+        // Without a token, the fixing pull request comes from the text of the recently merged ones.
+        val merged = pages<RestPull>("/repos/${repo.slug}/pulls?state=closed&sort=updated&direction=desc", MAX_MERGED_PAGES, fresh)
             .filter { it.mergedAt != null }
         val links = Linker.link(repo, merged.map { it.toLinkerPr() })
-        return raw.map { it.toIssue(links[it.number].orEmpty()) }
+        return raw.map { it.toIssue(links[it.number].orEmpty()) } to total
+    }
+
+    private fun fixedGraphQl(query: String): Pair<List<Issue>, Int> {
+        val out = ArrayList<Issue>()
+        var cursor: String? = null
+        var total = 0
+        for (page in 1..MAX_FIXED_PAGES) {
+            val variables = buildJsonObject {
+                put("q", query)
+                if (cursor != null) put("cursor", cursor)
+            }
+            val result = graphQl<GqlSearchData>(SEARCH_QUERY, variables).results
+            total = result.issueCount
+            result.nodes.filterNotNull().filter { it.number > 0 }.mapTo(out) { it.toIssue() }
+            if (!result.pageInfo.hasNextPage) break
+            cursor = result.pageInfo.endCursor
+        }
+        return out to total
+    }
+
+    private fun countGraphQl(queries: Map<FixedWindow, String>): Map<FixedWindow, Int> {
+        val variables = buildJsonObject { queries.forEach { (w, q) -> put(w.name.lowercase(), q) } }
+        val params = queries.keys.joinToString(", ") { "${'$'}${it.name.lowercase()}: String!" }
+        val fields = queries.keys.joinToString("\n") { w ->
+            val n = w.name.lowercase()
+            "$n: search(query: ${'$'}$n, type: ISSUE, first: 1) { issueCount }"
+        }
+        val data = graphQl<Map<String, GqlCountOnly>>("query($params) {\n$fields\n}", variables)
+        return queries.keys.associateWith { data[it.name.lowercase()]?.issueCount ?: 0 }
     }
 
     private fun openIssuesRest(repo: Repo, fresh: Boolean): List<Issue> {
@@ -82,15 +147,13 @@ class GitHubClient(
         return raw.map { it.toIssue(links[it.number].orEmpty()) }
     }
 
-    private fun issuesGraphQl(repo: Repo, scope: Scope, maxPages: Int): List<Issue> {
+    private fun issuesGraphQl(repo: Repo, maxPages: Int): List<Issue> {
         val out = ArrayList<Issue>()
         var cursor: String? = null
         repeat(maxPages) {
             val variables = buildJsonObject {
                 put("owner", repo.owner)
                 put("name", repo.name)
-                put("states", buildJsonArray { add(if (scope == Scope.OPEN) "OPEN" else "CLOSED") })
-                put("order", if (scope == Scope.OPEN) "CREATED_AT" else "UPDATED_AT")
                 if (cursor != null) put("cursor", cursor)
             }
             val data = graphQl<GqlData>(ISSUES_QUERY, variables)
@@ -221,7 +284,10 @@ class GitHubClient(
         const val PAGE = 100
         const val MAX_ISSUE_PAGES = 10
         const val MAX_PR_PAGES = 5
-        const val MAX_FIXED_PAGES = 3
+        /** GitHub's search returns at most 1,000 results. */
+        const val MAX_FIXED_PAGES = 10
+        const val MAX_MERGED_PAGES = 3
+        private const val DAY_MILLIS = 86_400_000L
 
         val JSON = Json {
             ignoreUnknownKeys = true
@@ -247,11 +313,29 @@ class GitHubClient(
         }
 
         private val ISSUES_QUERY = """
-            query(${'$'}owner: String!, ${'$'}name: String!, ${'$'}cursor: String, ${'$'}states: [IssueState!], ${'$'}order: IssueOrderField!) {
+            query(${'$'}owner: String!, ${'$'}name: String!, ${'$'}cursor: String) {
               repository(owner: ${'$'}owner, name: ${'$'}name) {
-                issues(first: 100, states: ${'$'}states, after: ${'$'}cursor, orderBy: {field: ${'$'}order, direction: DESC}) {
+                issues(first: 100, states: OPEN, after: ${'$'}cursor, orderBy: {field: CREATED_AT, direction: DESC}) {
                   pageInfo { hasNextPage endCursor }
-                  nodes {
+                  nodes { ...issue }
+                }
+              }
+            }
+        """.trimIndent() + ISSUE_FRAGMENTS
+
+        private val SEARCH_QUERY = """
+            query(${'$'}q: String!, ${'$'}cursor: String) {
+              results: search(query: ${'$'}q, type: ISSUE, first: 100, after: ${'$'}cursor) {
+                issueCount
+                pageInfo { hasNextPage endCursor }
+                nodes { ...issue }
+              }
+            }
+        """.trimIndent() + ISSUE_FRAGMENTS
+
+        // A getter, so the queries above can use it while the companion initialises.
+        private val ISSUE_FRAGMENTS: String get() = "\n" + """
+            fragment issue on Issue {
                     number title url createdAt updatedAt closedAt stateReason
                     author { login avatarUrl }
                     comments { totalCount }
@@ -266,9 +350,6 @@ class GitHubClient(
                         ... on ClosedEvent { createdAt closer { __typename ... on PullRequest { ...pr } } }
                       }
                     }
-                  }
-                }
-              }
             }
             fragment pr on PullRequest {
               number title url state isDraft updatedAt
@@ -412,6 +493,25 @@ internal data class RestEvent(
 @Serializable
 internal data class RestError(val message: String = "")
 
+@Serializable
+internal data class RestSearch(
+    @SerialName("total_count") val totalCount: Int = 0,
+    val items: List<RestIssue> = emptyList(),
+)
+
+@Serializable
+internal data class GqlSearch(
+    val issueCount: Int = 0,
+    val pageInfo: GqlPageInfo = GqlPageInfo(),
+    val nodes: List<GqlIssue?> = emptyList(),
+)
+
+@Serializable
+internal data class GqlSearchData(val results: GqlSearch = GqlSearch())
+
+@Serializable
+internal data class GqlCountOnly(val issueCount: Int = 0)
+
 // --- GraphQL shapes -------------------------------------------------------------------------------------------
 
 @Serializable
@@ -491,9 +591,9 @@ internal data class GqlEvent(
 
 @Serializable
 internal data class GqlIssue(
-    val number: Int,
-    val title: String,
-    val url: String,
+    val number: Int = 0,
+    val title: String = "",
+    val url: String = "",
     val createdAt: String = "",
     val updatedAt: String = "",
     val closedAt: String? = null,

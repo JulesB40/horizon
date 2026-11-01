@@ -112,42 +112,50 @@ class GitHubClientTest {
     }
 
     @Test
-    fun restFixedListKeepsCompletedIssuesWithTheirMergedPr() = runTest {
-        routes["GET /repos/horizon-rust/horizon/issues"] = """[
-          {"number":10,"title":"Old fix","html_url":"u","state":"closed","state_reason":"completed",
-           "closed_at":"2026-10-01T00:00:00Z","updated_at":"2026-10-31T00:00:00Z"},
-          {"number":11,"title":"Won't do","html_url":"u","state":"closed","state_reason":"not_planned",
-           "closed_at":"2026-10-30T00:00:00Z"},
+    fun restFixedListSearchesTheWindowAndCountsEachWindow() = runTest {
+        val now = GitHubClient.millis("2026-11-01T12:00:00Z")
+        routes["GET /search/issues"] = """{"total_count":2,"items":[
+          {"number":10,"title":"Older fix","html_url":"u","state":"closed","state_reason":"completed",
+           "closed_at":"2026-10-28T00:00:00Z","updated_at":"2026-10-31T00:00:00Z"},
           {"number":12,"title":"New fix","html_url":"u","state":"closed","state_reason":"completed",
-           "closed_at":"2026-10-30T00:00:00Z"}
-        ]"""
+           "closed_at":"2026-11-01T10:00:00Z"}
+        ]}"""
         routes["GET /repos/horizon-rust/horizon/pulls"] = """[
-          {"number":20,"title":"Fix it","body":"Fixes #12","html_url":"p","state":"closed","merged_at":"2026-10-30T00:00:00Z"},
+          {"number":20,"title":"Fix it","body":"Fixes #12","html_url":"p","state":"closed","merged_at":"2026-11-01T10:00:00Z"},
           {"number":21,"title":"Abandoned","body":"Fixes #10","html_url":"p","state":"closed","merged_at":null}
         ]"""
-        val fixed = client().issues(Repo.HORIZON, Scope.FIXED)
-        assertEquals(listOf(12, 10), fixed.map { it.number })
-        assertTrue(fixed.all { it.status == IssueStatus.FIXED })
-        assertEquals(20, fixed[0].primaryPr!!.number)
-        assertEquals(null, fixed[1].primaryPr)
+        val fixed = client().fixedIssues(Repo.HORIZON, FixedWindow.WEEK, now = now)
+        assertEquals(listOf(12, 10), fixed.issues.map { it.number })
+        assertTrue(fixed.issues.all { it.status == IssueStatus.FIXED })
+        assertEquals(20, fixed.issues[0].primaryPr!!.number)
+        assertEquals(null, fixed.issues[1].primaryPr)
+        // The day comes from the complete week list; the month is asked (the mock answers 2 again).
+        assertEquals(mapOf(FixedWindow.WEEK to 2, FixedWindow.DAY to 1, FixedWindow.MONTH to 2), fixed.counts)
+        assertTrue(!fixed.capped)
+
+        val first = server.takeRequest().requestUrl!!
+        assertEquals("/search/issues", first.encodedPath)
+        val q = first.queryParameter("q")!!
+        assertTrue(q.contains("repo:horizon-rust/horizon is:issue is:closed reason:completed closed:>=2026-10-25T12:00:00Z"), q)
     }
 
     @Test
     fun graphQlFixedListReadsTheCloser() = runTest {
-        routes["POST /graphql"] = """{"data":{"repository":{"issues":{
+        routes["POST /graphql"] = """{"data":{"results":{"issueCount":1,
           "pageInfo":{"hasNextPage":false,"endCursor":null},
           "nodes":[{"number":7,"title":"T","url":"https://github.com/horizon-rust/horizon/issues/7",
-            "closedAt":"2026-10-23T00:00:00Z","stateReason":"COMPLETED",
+            "closedAt":"2026-10-31T00:00:00Z","stateReason":"COMPLETED",
             "closedByPullRequestsReferences":{"nodes":[]},
             "timelineItems":{"nodes":[
-              {"__typename":"ClosedEvent","createdAt":"2026-10-23T00:00:00Z","closer":{"__typename":"PullRequest",
-                "number":9,"title":"P","url":"p","state":"MERGED","isDraft":false,"updatedAt":"2026-10-23T00:00:00Z",
+              {"__typename":"ClosedEvent","createdAt":"2026-10-31T00:00:00Z","closer":{"__typename":"PullRequest",
+                "number":9,"title":"P","url":"p","state":"MERGED","isDraft":false,"updatedAt":"2026-10-31T00:00:00Z",
                 "repository":{"nameWithOwner":"horizon-rust/horizon"}}}
-            ]}}]}}}}"""
-        val issue = client("tok").issues(Repo.HORIZON, Scope.FIXED).single()
+            ]}}]}}}"""
+        val fixed = client("tok").fixedIssues(Repo.HORIZON, FixedWindow.WEEK, now = GitHubClient.millis("2026-11-01T00:00:00Z"))
+        val issue = fixed.issues.single()
         assertEquals(9, issue.closedByPr)
         assertEquals(PrState.MERGED, issue.primaryPr!!.state)
-        assertTrue(server.takeRequest().body.readUtf8().contains("\"states\":[\"CLOSED\"]"))
+        assertTrue(server.takeRequest().body.readUtf8().contains("reason:completed"))
     }
 
     @Test

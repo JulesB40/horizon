@@ -87,6 +87,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.horizonlab.issues.core.Issue
 import dev.horizonlab.issues.core.IssueStatus
+import dev.horizonlab.issues.core.FixedWindow
 import dev.horizonlab.issues.core.Scope
 import dev.horizonlab.issues.data.Group
 import dev.horizonlab.issues.ui.components.GroupNameDialog
@@ -112,6 +113,7 @@ fun IssueListScreen(
     snackbar: SnackbarHostState,
     onRefresh: () -> Unit,
     onScope: (Scope) -> Unit,
+    onFixedWindow: (FixedWindow) -> Unit,
     onFilter: (Filter) -> Unit,
     onSort: (Sort) -> Unit,
     onQuery: (String) -> Unit,
@@ -147,7 +149,7 @@ fun IssueListScreen(
                 contentPadding = WindowInsets.navigationBars.asPaddingValues(),
             ) {
                 item(key = "header") { Header(ui, onScope, onSettings) }
-                item(key = "overview") { if (ui.scope == Scope.OPEN) Overview(ui, onFilter) else FixedOverview(ui) }
+                item(key = "overview") { if (ui.scope == Scope.OPEN) Overview(ui, onFilter) else FixedOverview(ui, onFixedWindow) }
                 stickyHeader(key = "controls") {
                     Controls(ui, onFilter, onSort, onQuery, onLabel, onGroup = actions.show, onNewGroup = { naming = "" })
                 }
@@ -370,11 +372,15 @@ private fun ScopeToggle(scope: Scope, onScope: (Scope) -> Unit, modifier: Modifi
     }
 }
 
-/** The fixed scope's summary: how many were closed as fixed lately, and how many of them by a merged pull request. */
+/**
+ * The fixed scope's summary: how many issues were fixed in the chosen window (exact, from GitHub's search), how
+ * many of those loaded a merged pull request closed, and the three windows to choose from.
+ */
 @Composable
-private fun FixedOverview(ui: ListUi) {
+private fun FixedOverview(ui: ListUi, onWindow: (FixedWindow) -> Unit) {
     val p = Theme.palette
-    val total = ui.all.size
+    val loaded = ui.all.size
+    val total = ui.fixedCounts[ui.fixedWindow] ?: loaded
     val withPr = ui.all.count { it.fixingPr != null }
     Column(
         Modifier
@@ -388,7 +394,7 @@ private fun FixedOverview(ui: ListUi) {
         Row(verticalAlignment = Alignment.Bottom) {
             Text(if (ui.loading && total == 0) "—" else total.toString(), style = Type.xl2, color = p.foreground)
             Spacer(Modifier.width(6.dp))
-            Text("fixed lately", style = Type.sm, color = p.secondary, modifier = Modifier.padding(bottom = 4.dp))
+            Text("fixed in ${ui.fixedWindow.label}", style = Type.sm, color = p.secondary, modifier = Modifier.padding(bottom = 4.dp))
             Spacer(Modifier.weight(1f))
             AnimatedVisibility(ui.loading || ui.refreshing, enter = fadeIn(), exit = fadeOut()) {
                 CircularProgressIndicator(Modifier.size(14.dp).padding(bottom = 2.dp), color = p.tertiary, strokeWidth = 1.5.dp)
@@ -397,24 +403,26 @@ private fun FixedOverview(ui: ListUi) {
         Spacer(Modifier.height(12.dp))
         // How many of them a merged pull request closed.
         Row(Modifier.fillMaxWidth().height(8.dp), horizontalArrangement = Arrangement.spacedBy(3.dp)) {
-            if (total == 0) {
+            if (loaded == 0) {
                 Box(Modifier.fillMaxSize().clip(CircleShape).background(p.grouped))
             } else {
                 if (withPr > 0) Box(Modifier.weight(withPr.toFloat()).fillMaxHeight().clip(CircleShape).background(p.merged.content))
-                if (total - withPr > 0) {
-                    Box(Modifier.weight((total - withPr).toFloat()).fillMaxHeight().clip(CircleShape).background(p.draft.content.copy(alpha = 0.4f)))
+                if (loaded - withPr > 0) {
+                    Box(Modifier.weight((loaded - withPr).toFloat()).fillMaxHeight().clip(CircleShape).background(p.draft.content.copy(alpha = 0.4f)))
                 }
             }
         }
         Spacer(Modifier.height(6.dp))
         Text(
-            "$withPr closed by a merged pull request",
+            "$withPr closed by a merged pull request" +
+                if (loaded < total) " · showing the $loaded most recently updated" else "",
             style = Type.xs2, color = p.tertiary,
         )
         Spacer(Modifier.height(12.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            listOf("Last 24h", "Last 7 days", "Last 30 days").zip(ui.recent).forEach { (label, count) ->
-                StatTile(label, count, p.merged, selected = false, onClick = null)
+            FixedWindow.entries.forEach { w ->
+                val count = ui.fixedCounts[w]
+                StatTile(w.label, count ?: 0, p.merged, selected = ui.fixedWindow == w, countText = count?.toString() ?: "—") { onWindow(w) }
             }
         }
     }
@@ -515,7 +523,14 @@ private fun Overview(ui: ListUi, onFilter: (Filter) -> Unit) {
 }
 
 @Composable
-private fun RowScope.StatTile(label: String, count: Int, tone: Tone, selected: Boolean, onClick: (() -> Unit)?) {
+private fun RowScope.StatTile(
+    label: String,
+    count: Int,
+    tone: Tone,
+    selected: Boolean,
+    countText: String = count.toString(),
+    onClick: (() -> Unit)?,
+) {
     val p = Theme.palette
     val shape = RoundedCornerShape(14.dp)
     Column(
@@ -533,7 +548,7 @@ private fun RowScope.StatTile(label: String, count: Int, tone: Tone, selected: B
             Text(label, style = Type.xs2, color = if (selected) tone.content else p.secondary, maxLines = 1)
         }
         Spacer(Modifier.height(4.dp))
-        Text(count.toString(), style = Type.lg, color = p.foreground)
+        Text(countText, style = Type.lg, color = p.foreground)
     }
 }
 

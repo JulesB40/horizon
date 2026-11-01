@@ -96,6 +96,7 @@ private fun App(vm: IssuesViewModel) {
                 snackbar = snackbar,
                 onRefresh = { vm.refresh(fresh = true) },
                 onScope = vm::setScope,
+                onFixedWindow = vm::setFixedWindow,
                 onFilter = vm::setFilter,
                 onSort = vm::setSort,
                 onQuery = vm::setQuery,

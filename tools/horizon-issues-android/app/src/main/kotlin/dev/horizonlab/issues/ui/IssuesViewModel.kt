@@ -9,6 +9,7 @@ import dev.horizonlab.issues.core.IssueDetail
 import dev.horizonlab.issues.core.IssueStatus
 import dev.horizonlab.issues.core.Label
 import dev.horizonlab.issues.core.RateLimit
+import dev.horizonlab.issues.core.FixedWindow
 import dev.horizonlab.issues.core.Repo
 import dev.horizonlab.issues.core.Scope
 import dev.horizonlab.issues.data.CachedIssues
@@ -66,8 +67,9 @@ data class ListUi(
     val loading: Boolean = false,
     val refreshing: Boolean = false,
     val error: String? = null,
-    /** Fixed issues closed in the last day, week and month. */
-    val recent: List<Int> = listOf(0, 0, 0),
+    /** How far back the fixed list reaches, and how many issues were fixed in each window (exact, from search). */
+    val fixedWindow: FixedWindow = FixedWindow.WEEK,
+    val fixedCounts: Map<FixedWindow, Int> = emptyMap(),
     /** Pins and groups of this repository. */
     val saved: Saved = Saved(),
     /** The group shown instead of the scope's list, by id. */
@@ -113,8 +115,6 @@ data class ListUi(
             Sort.DISCUSSED -> filtered.sortedByDescending { it.comments }
             Sort.OLDEST -> filtered.sortedBy(time)
         }
-        val day = 86_400_000L
-        val recent = listOf(1L, 7L, 30L).map { days -> lists[Scope.FIXED].orEmpty().count { now - it.closedAt <= days * day } }
         val labelCounts = all.flatMap { it.labels }.groupBy { it.name }
             .map { (_, same) -> same.first() to same.size }
             .sortedByDescending { it.second }
@@ -127,7 +127,6 @@ data class ListUi(
             missing = missing,
             counts = Filter.entries.associateWith { f -> all.count(f::matches) },
             labels = labelCounts,
-            recent = recent,
         )
     }
 }
@@ -170,9 +169,14 @@ class IssuesViewModel(app: Application) : AndroidViewModel(app) {
     private fun loadCached() {
         val repo = store.settings.value.repo
         _list.update { old ->
-            var ui = ListUi(repo = repo, scope = old.scope, filter = old.filter, sort = old.sort, saved = savedStore.saved.value)
-            for (scope in Scope.entries) {
-                cache.read(repo, scope)?.let { ui = ui.withList(scope, it.issues, it.fetchedAt) }
+            var ui = ListUi(
+                repo = repo, scope = old.scope, filter = old.filter, sort = old.sort, saved = savedStore.saved.value,
+                fixedWindow = old.fixedWindow,
+            )
+            cache.read(repo, Scope.OPEN)?.let { ui = ui.withList(Scope.OPEN, it.issues, it.fetchedAt) }
+            cache.read(repo, Scope.FIXED, old.fixedWindow)?.let { c ->
+                ui = ui.withList(Scope.FIXED, c.issues, c.fetchedAt)
+                    .copy(fixedCounts = c.counts.mapNotNull { (k, v) -> FixedWindow.entries.firstOrNull { it.name == k }?.let { it to v } }.toMap())
             }
             ui.recompute()
         }
@@ -186,10 +190,20 @@ class IssuesViewModel(app: Application) : AndroidViewModel(app) {
         _list.update { it.copy(loading = it.all.isEmpty(), refreshing = it.all.isNotEmpty() && fresh, error = null) }
         refreshJob = viewModelScope.launch {
             try {
-                val issues = client.issues(repo, scope, fresh)
                 val now = System.currentTimeMillis()
-                cache.write(repo, scope, CachedIssues(now, issues))
-                _list.update { it.withList(scope, issues, now).copy(loading = false, refreshing = false).recompute() }
+                if (scope == Scope.OPEN) {
+                    val issues = client.issues(repo, scope, fresh)
+                    cache.write(repo, scope, CachedIssues(now, issues))
+                    _list.update { it.withList(scope, issues, now).copy(loading = false, refreshing = false).recompute() }
+                } else {
+                    val window = _list.value.fixedWindow
+                    val fixed = client.fixedIssues(repo, window, fresh, now)
+                    cache.write(repo, scope, CachedIssues(now, fixed.issues, fixed.counts.mapKeys { it.key.name }), window)
+                    _list.update {
+                        if (it.fixedWindow != window) it
+                        else it.withList(scope, fixed.issues, now).copy(fixedCounts = fixed.counts, loading = false, refreshing = false).recompute()
+                    }
+                }
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -206,6 +220,18 @@ class IssuesViewModel(app: Application) : AndroidViewModel(app) {
         _list.update { it.copy(scope = scope, error = null, loading = false, refreshing = false).recompute() }
         val age = System.currentTimeMillis() - _list.value.fetchedAt
         if (_list.value.all.isEmpty() || age > 60_000) refresh(fresh = false) else refreshJob?.cancel()
+    }
+
+    /** Shows the issues fixed in another window: from the cache at once, then from GitHub. */
+    fun setFixedWindow(window: FixedWindow) {
+        if (window == _list.value.fixedWindow) return
+        val cached = cache.read(store.settings.value.repo, Scope.FIXED, window)
+        _list.update { ui ->
+            ui.copy(fixedWindow = window)
+                .withList(Scope.FIXED, cached?.issues.orEmpty(), cached?.fetchedAt ?: 0)
+                .recompute()
+        }
+        refresh(fresh = false)
     }
 
     fun setFilter(filter: Filter) = _list.update { it.copy(filter = filter).recompute() }

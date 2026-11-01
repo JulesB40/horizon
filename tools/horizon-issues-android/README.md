@@ -11,9 +11,9 @@ part of the game. Kotlin and Jetpack Compose; the font is Horizon's own Geist fr
 - **The list**: search by title, `#number`, `@user` or label; filter by status or label; sort by newest, recently
   updated, most discussed or oldest. Each row has a status pill (`Available`, `@login · 2d left`, `PR #123`,
   `Draft #123`), labels, assignees and comment count. Pull to refresh; the last list is kept for offline starts.
-- **Open / Fixed**: the toggle beside the title switches to the issues recently closed as fixed (the last 300
-  closed issues GitHub touched, keeping those closed as completed), most recently closed first, each with the merged
-  pull request that closed it, and how many were fixed in the last day, week and month.
+- **Open / Fixed**: the toggle beside the title switches to the issues closed as completed in the last 24 hours,
+  7 days (the default) or 30 days, picked on the card, most recently closed first, each with the merged pull request
+  that closed it. The counts are exact (GitHub's search); the list itself stops at search's 1,000 results.
 - **Pins and groups**: long-press a row, or use the pin and bookmark buttons on an issue. Pinned issues stay at the
   top of the list; groups are named collections (*To try*, *Rendering*...) shown as chips beside the filters, each
   opening its issues from both the open and fixed lists. They live on the phone, per repository.
