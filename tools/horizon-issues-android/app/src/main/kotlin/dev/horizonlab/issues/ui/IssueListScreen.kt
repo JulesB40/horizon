@@ -1,5 +1,6 @@
 package dev.horizonlab.issues.ui
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.fadeIn
@@ -9,6 +10,7 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -41,11 +43,17 @@ import androidx.compose.material.icons.automirrored.rounded.Sort
 import androidx.compose.material.icons.rounded.ChatBubbleOutline
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.CreateNewFolder
+import androidx.compose.material.icons.rounded.Delete
+import androidx.compose.material.icons.rounded.Edit
+import androidx.compose.material.icons.rounded.Folder
+import androidx.compose.material.icons.rounded.PushPin
 import androidx.compose.material.icons.rounded.ErrorOutline
 import androidx.compose.material.icons.rounded.ExpandMore
 import androidx.compose.material.icons.rounded.Inbox
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.Settings
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -56,6 +64,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -79,6 +88,11 @@ import androidx.compose.ui.unit.sp
 import dev.horizonlab.issues.core.Issue
 import dev.horizonlab.issues.core.IssueStatus
 import dev.horizonlab.issues.core.Scope
+import dev.horizonlab.issues.data.Group
+import dev.horizonlab.issues.ui.components.GroupNameDialog
+import dev.horizonlab.issues.ui.components.SaveSheet
+import dev.horizonlab.issues.ui.components.SavedActions
+import dev.horizonlab.issues.ui.components.plural
 import dev.horizonlab.issues.ui.components.AvatarStack
 import dev.horizonlab.issues.ui.components.LabelChip
 import dev.horizonlab.issues.ui.components.SkeletonBox
@@ -102,11 +116,18 @@ fun IssueListScreen(
     onSort: (Sort) -> Unit,
     onQuery: (String) -> Unit,
     onLabel: (String?) -> Unit,
-    onOpen: (Issue) -> Unit,
+    onOpen: (Int) -> Unit,
     onSettings: () -> Unit,
+    actions: SavedActions,
 ) {
     val p = Theme.palette
     val listState = rememberLazyListState()
+    // The issue whose save sheet is open (long-press a row), and the group being named ("" for a new one).
+    var sheetFor by remember { mutableStateOf<Issue?>(null) }
+    var naming by remember { mutableStateOf<String?>(null) }
+    var deleting by remember { mutableStateOf<Group?>(null) }
+    // Back leaves a group before it leaves the app.
+    BackHandler(enabled = ui.group != null) { actions.show(null) }
     Scaffold(
         containerColor = p.screen,
         snackbarHost = { SnackbarHost(snackbar) },
@@ -127,7 +148,14 @@ fun IssueListScreen(
             ) {
                 item(key = "header") { Header(ui, onScope, onSettings) }
                 item(key = "overview") { if (ui.scope == Scope.OPEN) Overview(ui, onFilter) else FixedOverview(ui) }
-                stickyHeader(key = "controls") { Controls(ui, onFilter, onSort, onQuery, onLabel) }
+                stickyHeader(key = "controls") {
+                    Controls(ui, onFilter, onSort, onQuery, onLabel, onGroup = actions.show, onNewGroup = { naming = "" })
+                }
+                ui.selectedGroup?.let { g ->
+                    item(key = "group-bar") {
+                        GroupBar(g, onRename = { naming = g.id }, onDelete = { deleting = g }, onClose = { actions.show(null) })
+                    }
+                }
 
                 if (ui.error != null && ui.all.isNotEmpty()) {
                     item(key = "banner") { ErrorBanner(ui.error, ui.fetchedAt, onRefresh) }
@@ -138,11 +166,12 @@ fun IssueListScreen(
                     ui.error != null && ui.all.isEmpty() -> item(key = "error") {
                         EmptyState(Icons.Rounded.ErrorOutline, p.danger, "Couldn't load issues", ui.error, "Try again", onRefresh)
                     }
-                    ui.visible.isEmpty() -> item(key = "empty") {
+                    ui.visible.isEmpty() && ui.pinnedVisible.isEmpty() && ui.missing.isEmpty() -> item(key = "empty") {
                         EmptyState(
                             Icons.Rounded.Inbox, p.draft, "Nothing here",
                             when {
                                 ui.query.isNotBlank() -> "No issue matches “${ui.query}”."
+                                ui.selectedGroup != null -> "This group is empty. Long-press an issue, or tap Save on one, to add it."
                                 ui.scope == Scope.FIXED -> "No issue was closed as fixed lately."
                                 else -> "No open issue in this view."
                             },
@@ -153,12 +182,128 @@ fun IssueListScreen(
                             onQuery("")
                         }
                     }
-                    else -> items(ui.visible, key = { it.number }) { issue ->
-                        IssueRow(issue, Modifier.animateItem()) { onOpen(issue) }
+                    else -> {
+                        if (ui.pinnedVisible.isNotEmpty()) {
+                            item(key = "pinned-title") { ListSection("Pinned", ui.pinnedVisible.size) }
+                            items(ui.pinnedVisible, key = { "pin" + it.number }) { issue ->
+                                IssueRow(issue, Modifier.animateItem(), pinned = true, onLongClick = { sheetFor = issue }) { onOpen(issue.number) }
+                            }
+                            if (ui.visible.isNotEmpty()) {
+                                item(key = "rest-title") { ListSection(if (ui.selectedGroup != null) "In this group" else "Everything else", ui.visible.size) }
+                            }
+                        }
+                        items(ui.visible, key = { it.number }) { issue ->
+                            IssueRow(issue, Modifier.animateItem(), onLongClick = { sheetFor = issue }) { onOpen(issue.number) }
+                        }
+                        items(ui.missing, key = { "missing$it" }) { n -> MissingRow(n) { onOpen(n) } }
                     }
                 }
             }
         }
+    }
+
+    sheetFor?.let { issue ->
+        SaveSheet(
+            number = issue.number,
+            title = issue.title,
+            saved = ui.saved,
+            onPin = { actions.pin(issue.number) },
+            onToggle = { id, inGroup -> actions.toggle(id, issue.number, inGroup) },
+            onCreate = { name -> actions.create(name, issue.number) },
+            onDismiss = { sheetFor = null },
+        )
+    }
+    naming?.let { id ->
+        val group = ui.saved.groups.firstOrNull { it.id == id }
+        GroupNameDialog(
+            title = if (group == null) "New group" else "Rename group",
+            initial = group?.name.orEmpty(),
+            confirm = if (group == null) "Create" else "Rename",
+            onConfirm = { name ->
+                if (group == null) actions.create(name, null) else actions.rename(group.id, name)
+                naming = null
+            },
+            onDismiss = { naming = null },
+        )
+    }
+    deleting?.let { group ->
+        AlertDialog(
+            onDismissRequest = { deleting = null },
+            containerColor = p.card,
+            title = { Text("Delete “${group.name}”?", style = Type.lg, color = p.foreground) },
+            text = { Text("Its ${group.issues.size.plural("issue")} stay on GitHub; only the group goes.", style = Type.sm, color = p.secondary) },
+            confirmButton = {
+                TextButton(onClick = {
+                    actions.delete(group.id)
+                    deleting = null
+                }) { Text("Delete", style = Type.sm.copy(fontWeight = FontWeight.SemiBold), color = p.danger.content) }
+            },
+            dismissButton = { TextButton(onClick = { deleting = null }) { Text("Cancel", style = Type.sm, color = p.secondary) } },
+        )
+    }
+}
+
+@Composable
+private fun ListSection(title: String, count: Int) {
+    val p = Theme.palette
+    Row(Modifier.padding(start = 20.dp, end = 20.dp, top = 14.dp, bottom = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+        Text(title.uppercase(), style = Type.xs3.copy(fontWeight = FontWeight.SemiBold, letterSpacing = Type.xs3.fontSize * 0.08f), color = p.tertiary)
+        Spacer(Modifier.width(6.dp))
+        Text(count.toString(), style = Type.xs3, color = p.tertiary)
+    }
+}
+
+/** The group being shown, with its actions. */
+@Composable
+private fun GroupBar(group: Group, onRename: () -> Unit, onDelete: () -> Unit, onClose: () -> Unit) {
+    val p = Theme.palette
+    val tone = p.review
+    Row(
+        Modifier
+            .padding(horizontal = 16.dp, vertical = 10.dp)
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(14.dp))
+            .background(tone.background)
+            .border(1.dp, tone.border, RoundedCornerShape(14.dp))
+            .padding(start = 12.dp, end = 4.dp, top = 4.dp, bottom = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(Icons.Rounded.Folder, null, tint = tone.content, modifier = Modifier.size(18.dp))
+        Spacer(Modifier.width(10.dp))
+        Column(Modifier.weight(1f)) {
+            Text(group.name, style = Type.sm.copy(fontWeight = FontWeight.SemiBold), color = tone.content, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(group.issues.size.plural("issue"), style = Type.xs2, color = tone.content.copy(alpha = 0.8f))
+        }
+        SmallIcon(Icons.Rounded.Edit, "Rename", tone.content, onRename)
+        SmallIcon(Icons.Rounded.Delete, "Delete", tone.content, onDelete)
+        SmallIcon(Icons.Rounded.Close, "Show all issues", tone.content, onClose)
+    }
+}
+
+@Composable
+private fun SmallIcon(icon: ImageVector, description: String, tint: Color, onClick: () -> Unit) {
+    Box(Modifier.size(40.dp).clip(CircleShape).clickable(onClick = onClick), contentAlignment = Alignment.Center) {
+        Icon(icon, description, tint = tint, modifier = Modifier.size(18.dp))
+    }
+}
+
+/** A group member neither list holds: its number, opening the issue. */
+@Composable
+private fun MissingRow(number: Int, onClick: () -> Unit) {
+    val p = Theme.palette
+    Column {
+        Row(
+            Modifier.fillMaxWidth().clickable(onClick = onClick).padding(horizontal = 18.dp, vertical = 14.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Box(Modifier.size(22.dp).clip(CircleShape).background(p.grouped), contentAlignment = Alignment.Center) {
+                Icon(Icons.Rounded.Folder, null, tint = p.tertiary, modifier = Modifier.size(12.dp))
+            }
+            Spacer(Modifier.width(12.dp))
+            Text("#$number", style = Type.sm.copy(fontFamily = GeistMono), color = p.foreground)
+            Text("  ·  not in the loaded lists, tap to open", style = Type.xs2, color = p.tertiary, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
+        HorizontalDivider(Modifier.padding(start = 52.dp), color = p.separator, thickness = 1.dp)
     }
 }
 
@@ -401,6 +546,8 @@ private fun Controls(
     onSort: (Sort) -> Unit,
     onQuery: (String) -> Unit,
     onLabel: (String?) -> Unit,
+    onGroup: (String?) -> Unit,
+    onNewGroup: () -> Unit,
 ) {
     val p = Theme.palette
     Column(Modifier.fillMaxWidth().background(p.screen).padding(top = 4.dp)) {
@@ -417,14 +564,51 @@ private fun Controls(
             horizontalArrangement = Arrangement.spacedBy(6.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            if (ui.scope == Scope.OPEN) {
+            if (ui.scope == Scope.OPEN && ui.selectedGroup == null) {
                 Filter.entries.forEach { f ->
                     FilterPill(f.label, ui.counts[f] ?: 0, ui.filter == f) { onFilter(f) }
                 }
             }
             LabelMenu(ui, onLabel)
+            Box(Modifier.width(1.dp).height(20.dp).background(p.border))
+            ui.saved.groups.forEach { g ->
+                GroupChip(g.name, g.issues.size, ui.group == g.id) { onGroup(if (ui.group == g.id) null else g.id) }
+            }
+            Row(
+                Modifier
+                    .clip(CircleShape)
+                    .border(1.dp, p.border, CircleShape)
+                    .clickable(onClick = onNewGroup)
+                    .padding(start = 8.dp, end = 12.dp, top = 6.dp, bottom = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(Icons.Rounded.CreateNewFolder, null, tint = p.secondary, modifier = Modifier.size(15.dp))
+                Spacer(Modifier.width(5.dp))
+                Text(if (ui.saved.groups.isEmpty()) "New group" else "Group", style = Type.xs.copy(fontWeight = FontWeight.Medium), color = p.secondary)
+            }
         }
         HorizontalDivider(color = p.separator, thickness = 1.dp)
+    }
+}
+
+@Composable
+private fun GroupChip(name: String, count: Int, selected: Boolean, onClick: () -> Unit) {
+    val p = Theme.palette
+    val tone = p.review
+    Row(
+        Modifier
+            .clip(CircleShape)
+            .background(if (selected) tone.background else Color.Transparent)
+            .border(1.dp, if (selected) tone.border else p.border, CircleShape)
+            .clickable(onClick = onClick)
+            .padding(start = 8.dp, end = 12.dp, top = 6.dp, bottom = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(Icons.Rounded.Folder, null, tint = if (selected) tone.content else p.tertiary, modifier = Modifier.size(15.dp))
+        Spacer(Modifier.width(5.dp))
+        Text(name, style = Type.xs.copy(fontWeight = FontWeight.Medium), color = if (selected) tone.content else p.foreground, maxLines = 1)
+        Spacer(Modifier.width(5.dp))
+        Text(count.toString(), style = Type.xs2, color = if (selected) tone.content.copy(alpha = 0.7f) else p.tertiary)
     }
 }
 
@@ -562,16 +746,22 @@ private fun LabelMenu(ui: ListUi, onLabel: (String?) -> Unit) {
 
 // --- Rows -----------------------------------------------------------------------------------------------------
 
-@OptIn(ExperimentalLayoutApi::class)
+@OptIn(ExperimentalLayoutApi::class, ExperimentalFoundationApi::class)
 @Composable
-fun IssueRow(issue: Issue, modifier: Modifier = Modifier, onClick: () -> Unit) {
+fun IssueRow(
+    issue: Issue,
+    modifier: Modifier = Modifier,
+    pinned: Boolean = false,
+    onLongClick: (() -> Unit)? = null,
+    onClick: () -> Unit,
+) {
     val p = Theme.palette
     val tone = p.tone(issue.status)
     Column(modifier) {
         Row(
             Modifier
                 .fillMaxWidth()
-                .clickable(onClick = onClick)
+                .combinedClickable(onClick = onClick, onLongClick = onLongClick, onLongClickLabel = "Pin or group")
                 .padding(start = 18.dp, end = 18.dp, top = 14.dp, bottom = 14.dp),
         ) {
             Box(
@@ -591,6 +781,10 @@ fun IssueRow(issue: Issue, modifier: Modifier = Modifier, onClick: () -> Unit) {
                 )
                 Spacer(Modifier.height(3.dp))
                 Row(verticalAlignment = Alignment.CenterVertically) {
+                    if (pinned) {
+                        Icon(Icons.Rounded.PushPin, "Pinned", tint = p.primaryText, modifier = Modifier.size(12.dp))
+                        Spacer(Modifier.width(3.dp))
+                    }
                     Text("#${issue.number}", style = Type.xs2.copy(fontFamily = GeistMono), color = p.secondary)
                     val meta = if (issue.closed) {
                         listOfNotNull("closed " + shortAgo(issue.closedAt), issue.fixingPr?.author?.login?.let { "by $it" })

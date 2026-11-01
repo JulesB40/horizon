@@ -32,6 +32,7 @@ import dev.horizonlab.issues.ui.IssueDetailScreen
 import dev.horizonlab.issues.ui.IssueListScreen
 import dev.horizonlab.issues.ui.IssuesViewModel
 import dev.horizonlab.issues.ui.SettingsScreen
+import dev.horizonlab.issues.ui.components.SavedActions
 import dev.horizonlab.issues.ui.theme.HorizonIssuesTheme
 import dev.horizonlab.issues.ui.theme.Theme
 import dev.horizonlab.issues.ui.theme.isDark
@@ -65,6 +66,16 @@ private fun App(vm: IssuesViewModel) {
     val settings by vm.settings.collectAsStateWithLifecycle()
     val rateLimit by vm.rateLimit.collectAsStateWithLifecycle()
     val snackbar = remember { SnackbarHostState() }
+    val actions = remember(vm) {
+        SavedActions(
+            pin = vm::togglePin,
+            toggle = vm::setInGroup,
+            create = { name, number -> vm.createGroup(name, number) },
+            rename = vm::renameGroup,
+            delete = vm::deleteGroup,
+            show = vm::setGroup,
+        )
+    }
 
     LaunchedEffect(Unit) {
         vm.messages.collect { snackbar.showSnackbar(it) }
@@ -89,8 +100,9 @@ private fun App(vm: IssuesViewModel) {
                 onSort = vm::setSort,
                 onQuery = vm::setQuery,
                 onLabel = vm::setLabel,
-                onOpen = { nav.navigate("issue/${it.number}") },
+                onOpen = { nav.navigate("issue/$it") },
                 onSettings = { nav.navigate("settings") },
+                actions = actions,
             )
         }
         composable("issue/{number}", arguments = listOf(navArgument("number") { type = NavType.IntType })) { entry ->
@@ -106,6 +118,8 @@ private fun App(vm: IssuesViewModel) {
                 onBack = { nav.popBackStack() },
                 onRefresh = { vm.loadDetail(number) },
                 onClaim = { vm.claim(number) },
+                saved = list.saved,
+                actions = actions,
             )
         }
         composable("settings") {

@@ -14,6 +14,9 @@ part of the game. Kotlin and Jetpack Compose; the font is Horizon's own Geist fr
 - **Open / Fixed**: the toggle beside the title switches to the issues recently closed as fixed (the last 300
   closed issues GitHub touched, keeping those closed as completed), most recently closed first, each with the merged
   pull request that closed it, and how many were fixed in the last day, week and month.
+- **Pins and groups**: long-press a row, or use the pin and bookmark buttons on an issue. Pinned issues stay at the
+  top of the list; groups are named collections (*To try*, *Rendering*...) shown as chips beside the filters, each
+  opening its issues from both the open and fixed lists. They live on the phone, per repository.
 - **An issue**: its status card (who claimed it and when, and the 5-day release clock of a `/claim` made without a
   pull request), its linked pull requests (open, draft, merged, closed; whether they close or mention it), the
   description and comments in Markdown. `/claim` comments (also `🤖 Agent: /claim`) are badged by what came of them:

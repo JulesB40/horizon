@@ -31,6 +31,11 @@ import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.automirrored.rounded.OpenInNew
 import androidx.compose.material.icons.rounded.ChatBubbleOutline
 import androidx.compose.material.icons.rounded.ErrorOutline
+import androidx.compose.material.icons.outlined.PushPin as PushPinOutline
+import androidx.compose.material.icons.rounded.Bookmark
+import androidx.compose.material.icons.rounded.BookmarkBorder
+import androidx.compose.material.icons.rounded.Folder
+import androidx.compose.material.icons.rounded.PushPin
 import androidx.compose.material.icons.rounded.Share
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
@@ -66,11 +71,14 @@ import dev.horizonlab.issues.core.LinkKind
 import dev.horizonlab.issues.core.LinkedPr
 import dev.horizonlab.issues.core.PrState
 import dev.horizonlab.issues.core.Repo
+import dev.horizonlab.issues.data.Saved
 import dev.horizonlab.issues.ui.components.Avatar
 import dev.horizonlab.issues.ui.components.AvatarStack
 import dev.horizonlab.issues.ui.components.LabelChip
 import dev.horizonlab.issues.ui.components.Markdown
 import dev.horizonlab.issues.ui.components.Pill
+import dev.horizonlab.issues.ui.components.SaveSheet
+import dev.horizonlab.issues.ui.components.SavedActions
 import dev.horizonlab.issues.ui.components.SkeletonBox
 import dev.horizonlab.issues.ui.components.ago
 import dev.horizonlab.issues.ui.components.countdown
@@ -96,12 +104,17 @@ fun IssueDetailScreen(
     onBack: () -> Unit,
     onRefresh: () -> Unit,
     onClaim: () -> Unit,
+    saved: Saved,
+    actions: SavedActions,
 ) {
     val p = Theme.palette
     val context = LocalContext.current
     val issue = state.detail?.issue ?: listCopy
     val url = issue?.url ?: "${repo.url}/issues/$number"
     var confirmClaim by remember { mutableStateOf(false) }
+    var saving by remember { mutableStateOf(false) }
+    val pinned = saved.isPinned(number)
+    val groups = saved.groupsOf(number)
     val comments = state.detail?.comments.orEmpty()
     val assignees = issue?.assignees.orEmpty()
     // What came of each /claim in the thread: held, refused by the workflow, or over.
@@ -124,6 +137,8 @@ fun IssueDetailScreen(
                     Spacer(Modifier.width(6.dp))
                     Text("#$number", style = Type.sm.copy(fontFamily = GeistMono), color = p.secondary)
                     Spacer(Modifier.weight(1f))
+                    RoundIcon(if (pinned) Icons.Rounded.PushPin else Icons.Outlined.PushPinOutline, if (pinned) "Unpin" else "Pin", { actions.pin(number) })
+                    RoundIcon(if (groups.isNotEmpty()) Icons.Rounded.Bookmark else Icons.Rounded.BookmarkBorder, "Save to a group", { saving = true })
                     RoundIcon(Icons.Rounded.Share, "Share", {
                         val send = Intent(Intent.ACTION_SEND).setType("text/plain")
                             .putExtra(Intent.EXTRA_TEXT, (issue?.title?.let { "$it\n" } ?: "") + url)
@@ -172,9 +187,13 @@ fun IssueDetailScreen(
                                 maxLines = 1, overflow = TextOverflow.Ellipsis,
                             )
                         }
-                        if (issue.labels.isNotEmpty()) {
+                        if (issue.labels.isNotEmpty() || groups.isNotEmpty() || pinned) {
                             Spacer(Modifier.height(12.dp))
                             FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                if (pinned) Pill("Pinned", p.review, icon = Icons.Rounded.PushPin)
+                                groups.forEach { g ->
+                                    Pill(g.name, p.review, Modifier.clickable { saving = true }, icon = Icons.Rounded.Folder)
+                                }
                                 issue.labels.forEach { LabelChip(it) }
                             }
                         }
@@ -232,6 +251,18 @@ fun IssueDetailScreen(
                 item(key = "end") { Spacer(Modifier.height(24.dp)) }
             }
         }
+    }
+
+    if (saving) {
+        SaveSheet(
+            number = number,
+            title = issue?.title,
+            saved = saved,
+            onPin = { actions.pin(number) },
+            onToggle = { id, inGroup -> actions.toggle(id, number, inGroup) },
+            onCreate = { name -> actions.create(name, number) },
+            onDismiss = { saving = false },
+        )
     }
 
     if (confirmClaim) {

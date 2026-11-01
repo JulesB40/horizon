@@ -12,7 +12,10 @@ import dev.horizonlab.issues.core.RateLimit
 import dev.horizonlab.issues.core.Repo
 import dev.horizonlab.issues.core.Scope
 import dev.horizonlab.issues.data.CachedIssues
+import dev.horizonlab.issues.data.Group
 import dev.horizonlab.issues.data.IssueCache
+import dev.horizonlab.issues.data.Saved
+import dev.horizonlab.issues.data.SavedStore
 import dev.horizonlab.issues.data.Settings
 import dev.horizonlab.issues.data.SettingsStore
 import kotlinx.coroutines.Job
@@ -65,7 +68,17 @@ data class ListUi(
     val error: String? = null,
     /** Fixed issues closed in the last day, week and month. */
     val recent: List<Int> = listOf(0, 0, 0),
+    /** Pins and groups of this repository. */
+    val saved: Saved = Saved(),
+    /** The group shown instead of the scope's list, by id. */
+    val group: String? = null,
+    /** The pinned issues that pass the filters, shown first (newest pin first). */
+    val pinnedVisible: List<Issue> = emptyList(),
+    /** Numbers of the shown group that neither list holds (closed long ago, not planned...). */
+    val missing: List<Int> = emptyList(),
 ) {
+    val selectedGroup: Group? get() = saved.groups.firstOrNull { it.id == group }
+
     /** The issues of the current scope. */
     val all: List<Issue> get() = lists[scope].orEmpty()
     val fetchedAt: Long get() = fetched[scope] ?: 0
@@ -77,9 +90,15 @@ data class ListUi(
 
     fun recompute(now: Long = System.currentTimeMillis()): ListUi {
         val q = query.trim().removePrefix("#").lowercase()
+        val shownGroup = selectedGroup
+        // A group gathers its issues from both lists, whatever their status.
+        val base = if (shownGroup == null) all else {
+            val members = shownGroup.issues.toSet()
+            (lists[Scope.OPEN].orEmpty() + lists[Scope.FIXED].orEmpty()).distinctBy { it.number }.filter { it.number in members }
+        }
         // Every fixed issue has the same status: the status filters apply to open issues only.
-        val statusFilter = if (scope == Scope.FIXED) Filter.ALL else filter
-        val filtered = all.filter { issue ->
+        val statusFilter = if (scope == Scope.FIXED || shownGroup != null) Filter.ALL else filter
+        val filtered = base.filter { issue ->
             statusFilter.matches(issue) &&
                 (label == null || issue.labels.any { it.name == label }) &&
                 (q.isEmpty() || issue.number.toString().startsWith(q) || issue.title.lowercase().contains(q) ||
@@ -99,8 +118,13 @@ data class ListUi(
         val labelCounts = all.flatMap { it.labels }.groupBy { it.name }
             .map { (_, same) -> same.first() to same.size }
             .sortedByDescending { it.second }
+        val pins = saved.pinned
+        val missing = if (shownGroup == null || q.isNotEmpty() || label != null) emptyList()
+        else shownGroup.issues.filter { n -> base.none { it.number == n } }
         return copy(
-            visible = sorted,
+            pinnedVisible = sorted.filter { it.number in pins }.sortedBy { pins.indexOf(it.number) },
+            visible = sorted.filterNot { it.number in pins },
+            missing = missing,
             counts = Filter.entries.associateWith { f -> all.count(f::matches) },
             labels = labelCounts,
             recent = recent,
@@ -118,6 +142,7 @@ data class DetailUi(
 class IssuesViewModel(app: Application) : AndroidViewModel(app) {
     private val store = SettingsStore(app)
     private val cache = IssueCache(app.filesDir)
+    private val savedStore = SavedStore(app, store.settings.value.repo)
     private val http = GitHubClient.httpClient(File(app.cacheDir, "http"))
     private var client = GitHubClient(http, store.settings.value.token.ifBlank { null })
 
@@ -145,7 +170,7 @@ class IssuesViewModel(app: Application) : AndroidViewModel(app) {
     private fun loadCached() {
         val repo = store.settings.value.repo
         _list.update { old ->
-            var ui = ListUi(repo = repo, scope = old.scope, filter = old.filter, sort = old.sort)
+            var ui = ListUi(repo = repo, scope = old.scope, filter = old.filter, sort = old.sort, saved = savedStore.saved.value)
             for (scope in Scope.entries) {
                 cache.read(repo, scope)?.let { ui = ui.withList(scope, it.issues, it.fetchedAt) }
             }
@@ -236,6 +261,44 @@ class IssuesViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    // --- Pins and groups -------------------------------------------------------------------------------------
+
+    private fun savedChanged() = _list.update { ui ->
+        val saved = savedStore.saved.value
+        ui.copy(saved = saved, group = ui.group?.takeIf { id -> saved.groups.any { it.id == id } }).recompute()
+    }
+
+    fun togglePin(number: Int) {
+        val pinned = !savedStore.saved.value.isPinned(number)
+        savedStore.togglePin(number)
+        savedChanged()
+        _messages.tryEmit(if (pinned) "Pinned #$number to the top" else "Unpinned #$number")
+    }
+
+    fun setGroup(id: String?) = _list.update { it.copy(group = id).recompute() }
+
+    /** Creates a group, with `number` in it when given, and returns its id. */
+    fun createGroup(name: String, number: Int? = null): String? {
+        val id = savedStore.createGroup(name, number)
+        savedChanged()
+        return id
+    }
+
+    fun renameGroup(id: String, name: String) {
+        savedStore.renameGroup(id, name)
+        savedChanged()
+    }
+
+    fun deleteGroup(id: String) {
+        savedStore.deleteGroup(id)
+        savedChanged()
+    }
+
+    fun setInGroup(id: String, number: Int, inGroup: Boolean) {
+        savedStore.setInGroup(id, number, inGroup)
+        savedChanged()
+    }
+
     fun updateSettings(change: (Settings) -> Settings) {
         val before = store.settings.value
         store.update(change)
@@ -243,6 +306,7 @@ class IssuesViewModel(app: Application) : AndroidViewModel(app) {
         if (after.token != before.token) client = GitHubClient(http, after.token.ifBlank { null })
         if (after.repo != before.repo) {
             _details.value = emptyMap()
+            savedStore.switchTo(after.repo)
             loadCached()
         }
         if (after.token != before.token || after.repo != before.repo) refresh(fresh = true)
